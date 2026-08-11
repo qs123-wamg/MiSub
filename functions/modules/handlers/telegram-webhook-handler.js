@@ -24,8 +24,20 @@
 
 import { StorageFactory } from '../../storage-adapter.js';
 import { clearAllNodeCaches } from '../../services/node-cache-service.js';
-import { createJsonResponse, escapeHtml, JSON_BODY_LIMITS, readJsonWithLimit } from '../utils.js';
+import { createJsonResponse, createTimeoutFetch, escapeHtml, JSON_BODY_LIMITS, readJsonWithLimit } from '../utils.js';
 import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS } from '../config.js';
+import { assertPublicNetworkUrl } from '../security-utils.js';
+import { extractValidNodes, parseNodeList } from '../utils/node-parser.js';
+import { getRegionEmoji } from '../utils/geo-utils.js';
+import { parseSubscriptionUserInfoHeader } from '../../services/subscription-service.js';
+import { generateClashConfig } from '../../utils/url-to-clash.js';
+const TELEGRAM_SUBSCRIPTION_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const TELEGRAM_PREVIEW_SESSION_PREFIX = 'tg_subscription_preview:';
+const TELEGRAM_PREVIEW_TTL_MS = 60 * 60 * 1000;
+const TELEGRAM_PREVIEW_NODE_LIMIT = 20;
+const TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT = 240;
+const TELEGRAM_PREVIEW_MESSAGE_LIMIT = 3900;
+const TELEGRAM_SUBSCRIPTION_TIMEOUT_MS = 18000;
 
 // ==================== 存储与配置 ====================
 
@@ -168,23 +180,434 @@ function extractNodeUrls(text) {
         'hysteria://', 'hysteria2://', 'hy2://', 'tuic://', 'snell://',
         'anytls://', 'wireguard://', 'socks5://', 'socks5-tls://'
     ];
+    const protocolPattern = protocols.map(protocol => protocol.replace('://', ':\\/\\/')).join('|');
+    const matches = String(text || '').match(new RegExp(`(?:${protocolPattern})[^\\s<>"']+`, 'gi')) || [];
     const urls = [];
-    const lines = text.split('\n');
 
-    for (const line of lines) {
-        const trimmed = line.trim();
-        const lowerTrimmed = trimmed.toLowerCase();
-        for (const protocol of protocols) {
-            if (lowerTrimmed.startsWith(protocol)) {
-                urls.push(trimmed);
-                break;
-            }
+    for (const match of matches) {
+        const candidate = match.replace(/[),\]}>，。！？；：]+$/g, '');
+        if (!urls.includes(candidate)) urls.push(candidate);
+    }
+
+    return urls;
+}
+
+/**
+ * 提取消息中的 HTTP/HTTPS 链接，允许链接前后带说明文字。
+ */
+function extractHttpUrls(text) {
+    const matches = String(text || '').match(/https?:\/\/[^\s<>"']+/gi) || [];
+    const urls = [];
+
+    for (const match of matches) {
+        const candidate = match.replace(/[),\]}>，。！？；：]+$/g, '');
+        try {
+            new URL(candidate);
+            if (!urls.includes(candidate)) urls.push(candidate);
+        } catch {
+            // 忽略无效 URL
         }
     }
 
     return urls;
 }
 
+/**
+ * 从 Base64 或明文内容中提取节点链接。
+ */
+function decodeNodeText(input) {
+    const parsedNodes = extractValidNodes(String(input || ''));
+    return parsedNodes.length > 0 ? parsedNodes : extractNodeUrls(input);
+}
+
+/**
+ * 获取并解析远程订阅内容。
+ */
+function parseAttachmentFilename(headerValue, sourceUrl) {
+    const match = String(headerValue || '').match(/filename\*?=(?:UTF-8''|["']?)([^"';]+)/i);
+    let filename = match?.[1] || '';
+    try { filename = decodeURIComponent(filename); } catch {}
+    if (!filename) {
+        try { filename = new URL(sourceUrl).hostname; } catch { filename = 'subscription'; }
+    }
+    return filename.trim();
+}
+
+function getSubscriptionDisplayName(filename, sourceUrl) {
+    const withoutExtension = String(filename || '').replace(/\.(ya?ml|txt|conf|json)$/i, '').trim();
+    if (withoutExtension) return withoutExtension;
+    try { return new URL(sourceUrl).hostname; } catch { return '未命名订阅'; }
+}
+
+async function readSubscriptionResponseText(response) {
+    const maxBytes = JSON_BODY_LIMITS.large;
+    const contentLength = Number(response.headers.get('Content-Length') || 0);
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+        throw new Error('订阅内容超过 5 MB 限制');
+    }
+
+    if (!response.body?.getReader) {
+        const buffer = await response.arrayBuffer();
+        if (buffer.byteLength > maxBytes) throw new Error('订阅内容超过 5 MB 限制');
+        return new TextDecoder('utf-8').decode(buffer);
+    }
+
+    const reader = response.body.getReader();
+    const chunks = [];
+    let totalBytes = 0;
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+            await reader.cancel().catch(() => {});
+            throw new Error('订阅内容超过 5 MB 限制');
+        }
+        chunks.push(value);
+    }
+
+    const bytes = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return new TextDecoder('utf-8').decode(bytes);
+}
+
+async function fetchSubscriptionPreview(url) {
+    const maxRedirects = 3;
+    let currentUrl = assertPublicNetworkUrl(url).toString();
+
+    for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount++) {
+        let response;
+        try {
+            response = await createTimeoutFetch(currentUrl, {
+                method: 'GET',
+                redirect: 'manual',
+                headers: {
+                    'User-Agent': TELEGRAM_SUBSCRIPTION_USER_AGENT,
+                    'Accept': '*/*'
+                }
+            }, TELEGRAM_SUBSCRIPTION_TIMEOUT_MS);
+        } catch (error) {
+            if (error?.name === 'AbortError') throw new Error('获取订阅超时');
+            throw error;
+        }
+
+        if ([301, 302, 303, 307, 308].includes(response.status)) {
+            const location = response.headers.get('Location');
+            if (!location) throw new Error(`HTTP ${response.status}`);
+            if (redirectCount >= maxRedirects) throw new Error('订阅重定向次数过多');
+            currentUrl = assertPublicNetworkUrl(new URL(location, currentUrl).toString()).toString();
+            continue;
+        }
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const content = await readSubscriptionResponseText(response);
+
+        const nodeUrls = decodeNodeText(content);
+        const filename = parseAttachmentFilename(response.headers.get('Content-Disposition'), currentUrl);
+        return {
+            sourceUrl: url,
+            finalUrl: currentUrl,
+            filename,
+            name: getSubscriptionDisplayName(filename, currentUrl),
+            nodeUrls,
+            userInfo: parseSubscriptionUserInfoHeader(response.headers.get('subscription-userinfo')),
+            fetchedAt: Date.now()
+        };
+    }
+
+    throw new Error('订阅重定向次数过多');
+}
+
+async function fetchSubscriptionNodeUrls(url) {
+    return (await fetchSubscriptionPreview(url)).nodeUrls;
+}
+/**
+ * 统一解析 Telegram 普通消息和 /import 输入。
+ */
+async function resolveTelegramNodeInput(text) {
+    const directNodeUrls = extractNodeUrls(text);
+    const httpUrls = extractHttpUrls(text);
+
+    if (httpUrls.length === 0) {
+        return directNodeUrls.length > 0 ? directNodeUrls : decodeNodeText(text);
+    }
+
+    const nodeUrls = [...directNodeUrls];
+    for (const url of httpUrls) {
+        nodeUrls.push(...await fetchSubscriptionNodeUrls(url));
+    }
+
+    return nodeUrls;
+}
+
+function formatTrafficBytes(value) {
+    const bytes = Number(value || 0);
+    if (!Number.isFinite(bytes) || bytes < 0) return '未知';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let size = bytes;
+    let unitIndex = 0;
+    while (size >= 1024 && unitIndex < units.length - 1) {
+        size /= 1024;
+        unitIndex++;
+    }
+    const digits = unitIndex >= 3 ? 2 : (unitIndex === 0 ? 0 : 1);
+    return `${Number(size.toFixed(digits))}${units[unitIndex]}`;
+}
+
+function normalizeTrafficBytes(value) {
+    const bytes = Number(value || 0);
+    return Number.isFinite(bytes) && bytes >= 0 ? bytes : 0;
+}
+
+function buildUsageProgress(percent) {
+    const clamped = Math.max(0, Math.min(100, Number(percent || 0)));
+    const filled = Math.round(clamped / 10);
+    return `${'▰'.repeat(filled)}${'▱'.repeat(10 - filled)}`;
+}
+
+function truncateTelegramText(value, maxLength = 80) {
+    const text = String(value || '');
+    return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+function formatExpiryDate(expireSeconds) {
+    const timestamp = Number(expireSeconds || 0) * 1000;
+    const date = new Date(timestamp);
+    if (!Number.isFinite(timestamp) || timestamp <= 0 || !Number.isFinite(date.getTime())) return '未知';
+    return new Intl.DateTimeFormat('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false
+    }).format(date).replace(/\//g, '-');
+}
+
+function formatRemainingTime(expireSeconds) {
+    const expire = Number(expireSeconds || 0);
+    if (!Number.isFinite(expire) || expire <= 0) return '未知';
+    const remainingMs = expire * 1000 - Date.now();
+    if (!Number.isFinite(remainingMs) || remainingMs <= 0) return '已到期';
+    const totalHours = Math.floor(remainingMs / 3600000);
+    const days = Math.floor(totalHours / 24);
+    const hours = totalHours % 24;
+    const minutes = Math.floor((remainingMs % 3600000) / 60000);
+    return `${days}天${hours}小时${minutes}分钟`;
+}
+
+function getPreviewSessionKey(sessionId) {
+    return `${TELEGRAM_PREVIEW_SESSION_PREFIX}${sessionId}`;
+}
+
+async function persistPreviewSession(env, storageAdapter, session) {
+    const serialized = JSON.stringify(session);
+    if (env?.MISUB_KV?.put) {
+        await env.MISUB_KV.put(getPreviewSessionKey(session.id), serialized, { expirationTtl: TELEGRAM_PREVIEW_TTL_MS / 1000 });
+        return;
+    }
+    await storageAdapter.put(getPreviewSessionKey(session.id), session);
+}
+
+async function readPreviewSession(env, storageAdapter, sessionId, userId) {
+    let session;
+    if (env?.MISUB_KV?.get) {
+        const raw = await env.MISUB_KV.get(getPreviewSessionKey(sessionId));
+        session = raw ? JSON.parse(raw) : null;
+    } else {
+        session = await storageAdapter.get(getPreviewSessionKey(sessionId));
+    }
+    if (!session || String(session.userId) !== String(userId)) return null;
+    if (Number(session.expiresAt || 0) <= Date.now()) {
+        try {
+            if (env?.MISUB_KV?.delete) await env.MISUB_KV.delete(getPreviewSessionKey(sessionId));
+            else await storageAdapter.delete(getPreviewSessionKey(sessionId));
+        } catch {}
+        return null;
+    }
+    return session;
+}
+
+function createPreviewSession(preview, userId, sessionId = generateId()) {
+    const nodes = parseNodeList(preview.nodeUrls.join('\n'));
+    return {
+        id: sessionId,
+        userId,
+        sourceUrl: preview.sourceUrl,
+        finalUrl: preview.finalUrl,
+        filename: preview.filename,
+        name: preview.name,
+        nodeUrls: nodes.map(node => node.url),
+        userInfo: preview.userInfo || null,
+        fetchedAt: preview.fetchedAt,
+        expiresAt: Date.now() + TELEGRAM_PREVIEW_TTL_MS,
+        savedSubscriptionId: null
+    };
+}
+
+function getPreviewNodes(session) {
+    return parseNodeList((session.nodeUrls || []).join('\n'));
+}
+
+function buildSubscriptionPreviewCard(session) {
+    const nodes = getPreviewNodes(session);
+    const protocols = [...new Set(nodes.map(node => node.protocol).filter(Boolean))];
+    const regions = [...new Set(nodes.map(node => node.region).filter(region => region && region !== '其他'))];
+    const info = session.userInfo || {};
+    const upload = normalizeTrafficBytes(info.upload);
+    const download = normalizeTrafficBytes(info.download);
+    const total = normalizeTrafficBytes(info.total);
+    const used = upload + download;
+    const remaining = Math.max(0, total - used);
+    const usagePercent = total > 0 ? Math.min(100, (used / total) * 100) : 0;
+    const expire = Number(info.expire || 0);
+    const status = Number.isFinite(expire) && expire > 0 && expire * 1000 <= Date.now()
+        ? '🔴 已到期'
+        : '🟢 正常';
+    const regionText = regions.slice(0, 10).map(region => `${getRegionEmoji(region)}${region}`).join('、') || '未识别';
+
+    const displayName = truncateTelegramText(session.name, 100);
+    const displayUrl = truncateTelegramText(session.sourceUrl, TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT);
+    const escapedSourceUrl = escapeHtml(session.sourceUrl);
+    const sourceLink = session.sourceUrl.length <= TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT
+        ? `<a href="${escapedSourceUrl}">${escapeHtml(displayUrl)}</a>`
+        : `<code>${escapeHtml(displayUrl)}</code>`;
+
+    let message = `📋 <b>机场名称:</b> <code>${escapeHtml(displayName)}</code>\n`;
+    message += `🔗 <b>订阅链接:</b> ${sourceLink}\n`;
+    if (total > 0) {
+        message += `<blockquote>📊 <b>流量详情:</b> ${formatTrafficBytes(used)} / ${formatTrafficBytes(total)} ${status}\n`;
+        message += `📈 <b>使用进度:</b> ${buildUsageProgress(usagePercent)} ${usagePercent.toFixed(1)}%\n`;
+        message += `💵 <b>剩余可用:</b> ${formatTrafficBytes(remaining)}\n`;
+        message += `⌛ <b>过期时间:</b> ${formatExpiryDate(info.expire)}\n`;
+        message += `⌛ <b>剩余时间:</b> ${formatRemainingTime(info.expire)}</blockquote>\n`;
+    }
+    message += `<blockquote>🔌 <b>协议类型:</b> ${escapeHtml(protocols.join('、') || '未识别')}\n`;
+    message += `📊 <b>节点总数:</b> ${nodes.length} | <b>国家/地区数:</b> ${regions.length}\n`;
+    message += `🏳️ <b>节点范围:</b> ${escapeHtml(regionText)}</blockquote>\n`;
+
+    const blockStart = `<blockquote expandable>📑 <b>节点列表 (共 ${nodes.length} 个)</b>\n`;
+    const blockEnd = '</blockquote>';
+    const nodeLines = [];
+    for (const node of nodes.slice(0, TELEGRAM_PREVIEW_NODE_LIMIT)) {
+        const flag = getRegionEmoji(node.region) || '🌐';
+        const line = `- ${flag} ${escapeHtml(node.protocol || '未知')}: ${escapeHtml(truncateTelegramText(node.name || '未命名节点'))}`;
+        const candidate = `${message}${blockStart}${[...nodeLines, line].join('\n')}${blockEnd}`;
+        if (candidate.length > TELEGRAM_PREVIEW_MESSAGE_LIMIT) break;
+        nodeLines.push(line);
+    }
+
+    const hiddenCount = nodes.length - nodeLines.length;
+    if (hiddenCount > 0) {
+        const summary = `- …等 (${hiddenCount} 个更多节点未显示)`;
+        const candidate = `${message}${blockStart}${[...nodeLines, summary].join('\n')}${blockEnd}`;
+        if (candidate.length <= TELEGRAM_PREVIEW_MESSAGE_LIMIT) nodeLines.push(summary);
+    }
+    if (nodeLines.length === 0) nodeLines.push('- 节点名称过长，请使用“显示全部节点”查看');
+
+    message += `${blockStart}${nodeLines.join('\n')}${blockEnd}`;
+    return message;
+}
+
+function buildSubscriptionPreviewKeyboard(session) {
+    return {
+        inline_keyboard: [
+            [
+                { text: '🔄 刷新订阅信息', callback_data: `sp_refresh_${session.id}` },
+                { text: '📄 显示全部节点', callback_data: `sp_all_${session.id}` }
+            ],
+            [
+                { text: '📤 导出Base64', callback_data: `sp_b64_${session.id}` },
+                { text: '📤 导出YAML', callback_data: `sp_yaml_${session.id}` }
+            ],
+            [
+                { text: '🔗 生成短链', callback_data: `sp_link_${session.id}` },
+                { text: session.savedSubscriptionId ? '✅ 已保存订阅' : '💾 保存订阅', callback_data: `sp_save_${session.id}` }
+            ]
+        ]
+    };
+}
+
+async function showSubscriptionPreview(chatId, sourceUrl, userId, env, requestCache = null, options = {}) {
+    const cache = requestCache || createRequestCache();
+    const storageAdapter = await getCachedStorageAdapter(env, cache);
+    const preview = await fetchSubscriptionPreview(sourceUrl);
+    if (preview.nodeUrls.length === 0) throw new Error('未识别到有效的节点');
+
+    const session = createPreviewSession(preview, userId, options.sessionId);
+    if (session.nodeUrls.length === 0) throw new Error('未识别到有效的节点');
+    if (options.savedSubscriptionId) session.savedSubscriptionId = options.savedSubscriptionId;
+    await persistPreviewSession(env, storageAdapter, session);
+    const message = buildSubscriptionPreviewCard(session);
+    const reply_markup = buildSubscriptionPreviewKeyboard(session);
+
+    if (options.messageId) {
+        await editTelegramMessage(chatId, options.messageId, message, env, { reply_markup, requestCache: cache });
+    } else {
+        await sendTelegramMessage(chatId, message, env, { reply_markup, requestCache: cache, disable_web_page_preview: true });
+    }
+    return session;
+}
+async function savePreviewSubscription(session, userId, env, cache) {
+    const storageAdapter = await getCachedStorageAdapter(env, cache);
+    const subscriptions = await getCachedSubscriptions(env, cache);
+    let subscription = subscriptions.find(item => item.url === session.sourceUrl);
+
+    const now = new Date().toISOString();
+    if (!subscription) {
+        subscription = {
+            id: generateId(),
+            name: session.name,
+            url: session.sourceUrl,
+            enabled: true,
+            source: 'telegram',
+            telegram_user_id: userId,
+            customUserAgent: TELEGRAM_SUBSCRIPTION_USER_AGENT,
+            nodeCount: session.nodeUrls.length,
+            userInfo: session.userInfo || null,
+            lastUpdate: now,
+            created_at: now
+        };
+        subscriptions.unshift(subscription);
+    } else {
+        subscription.nodeCount = session.nodeUrls.length;
+        subscription.userInfo = session.userInfo || null;
+        subscription.lastUpdate = now;
+        if (!subscription.customUserAgent) subscription.customUserAgent = TELEGRAM_SUBSCRIPTION_USER_AGENT;
+    }
+
+    await storageAdapter.putAllSubscriptions(subscriptions);
+
+    session.savedSubscriptionId = subscription.id;
+    await persistPreviewSession(env, storageAdapter, session);
+    return subscription;
+}
+
+async function ensurePreviewProfile(session, subscription, env, cache) {
+    const storageAdapter = await getCachedStorageAdapter(env, cache);
+    const profiles = await getCachedProfiles(env, cache);
+    let profile = profiles.find(item => item.telegramPreviewSubscriptionId === subscription.id);
+    if (!profile) {
+        profile = {
+            id: generateId(),
+            customId: `tg-${session.id}`,
+            name: session.name,
+            description: '由 Telegram 订阅解析卡片生成',
+            enabled: true,
+            isPublic: true,
+            subscriptions: [subscription.id],
+            manualNodes: [],
+            operators: [],
+            telegramPreviewSubscriptionId: subscription.id,
+            created_at: new Date().toISOString()
+        };
+        profiles.unshift(profile);
+        await storageAdapter.putAllProfiles(profiles);
+    }
+    return profile;
+}
 /**
  * 解析目标参数（支持序号、ID、all）
  * @returns {Object} { type: 'index'|'id'|'all'|'range', values: [] }
@@ -232,7 +655,8 @@ function parseTargetArgs(args) {
  */
 async function sendTelegramMessage(chatId, text, env, options = {}) {
     try {
-        const config = await getTelegramPushConfig(env, options.requestCache || null);
+        const { requestCache = null, ...telegramOptions } = options;
+        const config = await getTelegramPushConfig(env, requestCache);
         if (!config.bot_token) {
             console.error('[Telegram Push] Bot token not configured');
             return;
@@ -242,7 +666,7 @@ async function sendTelegramMessage(chatId, text, env, options = {}) {
             chat_id: chatId,
             text: text,
             parse_mode: 'HTML',
-            ...options
+            ...telegramOptions
         };
 
         const response = await fetch(`https://api.telegram.org/bot${config.bot_token}/sendMessage`, {
@@ -261,12 +685,61 @@ async function sendTelegramMessage(chatId, text, env, options = {}) {
     }
 }
 
+async function sendTelegramDocument(chatId, filename, content, env, caption = '') {
+    try {
+        const config = await getTelegramPushConfig(env);
+        if (!config.bot_token) return;
+        const safeName = truncateTelegramText(
+            String(filename || 'subscription.txt').replace(/[^a-zA-Z0-9._-]/g, '_'),
+            120
+        );
+        const form = new FormData();
+        form.append('chat_id', String(chatId));
+        if (caption) form.append('caption', truncateTelegramText(caption, 1000));
+        const document = typeof File === 'function'
+            ? new File([content], safeName, { type: 'application/octet-stream' })
+            : new Blob([content], { type: 'application/octet-stream' });
+        form.append('document', document, safeName);
+        const response = await fetch(`https://api.telegram.org/bot${config.bot_token}/sendDocument`, {
+            method: 'POST',
+            body: form
+        });
+        if (!response.ok) {
+            console.error('[Telegram Push] Failed to send document:', await response.clone().text());
+            await sendTelegramMessage(chatId, '❌ 导出文件发送失败，请稍后重试', env);
+        }
+        return response;
+    } catch (error) {
+        console.error('[Telegram Push] Error sending document:', error);
+        await sendTelegramMessage(chatId, '❌ 导出文件发送失败，请稍后重试', env);
+    }
+}
+
+async function sendAllPreviewNodes(chatId, session, env) {
+    const nodes = getPreviewNodes(session);
+    const lines = nodes.map((node, index) => {
+        const flag = getRegionEmoji(node.region) || '🌐';
+        return `${index + 1}. ${flag} ${escapeHtml(node.protocol || '未知')}: ${escapeHtml(truncateTelegramText(node.name || '未命名节点'))}`;
+    });
+    const chunks = [];
+    let current = `📄 <b>${escapeHtml(truncateTelegramText(session.name, 100))} · 全部节点 (${nodes.length})</b>\n\n`;
+    for (const line of lines) {
+        if ((current + line + '\n').length > 3800) {
+            chunks.push(current);
+            current = '';
+        }
+        current += `${line}\n`;
+    }
+    if (current) chunks.push(current);
+    for (const chunk of chunks) await sendTelegramMessage(chatId, chunk, env);
+}
 /**
  * 编辑 Telegram 消息
  */
 async function editTelegramMessage(chatId, messageId, text, env, options = {}) {
     try {
-        const config = await getTelegramPushConfig(env, options.requestCache || null);
+        const { requestCache = null, ...telegramOptions } = options;
+        const config = await getTelegramPushConfig(env, requestCache);
         if (!config.bot_token) return;
 
         const body = {
@@ -274,7 +747,7 @@ async function editTelegramMessage(chatId, messageId, text, env, options = {}) {
             message_id: messageId,
             text: text,
             parse_mode: 'HTML',
-            ...options
+            ...telegramOptions
         };
 
         await fetch(`https://api.telegram.org/bot${config.bot_token}/editMessageText`, {
@@ -461,7 +934,7 @@ async function handleStartCommand(chatId, env) {
         '• 📤 快速添加代理节点\n' +
         '• 📋 管理你的节点列表\n' +
         '• 🔗 获取订阅链接\n\n' +
-        '直接发送节点链接即可添加，支持批量添加。\n\n' +
+        '直接发送订阅链接、Base64 文本或节点链接即可解析并添加。\n\n' +
         '发送 /help 查看完整命令列表\n' +
         '发送 /menu 打开快捷菜单';
 
@@ -474,8 +947,8 @@ async function handleStartCommand(chatId, env) {
 async function handleHelpCommand(chatId, env) {
     const message =
         '📖 <b>MiSub Bot 命令帮助</b>\n\n' +
-        '<b>📤 添加节点</b>\n' +
-        '直接发送节点链接（支持批量）\n\n' +
+        '<b>📤 解析并添加</b>\n' +
+        '直接发送订阅链接、Base64 文本或节点链接（支持批量）\n\n' +
         '<b>📋 查看</b>\n' +
         '/list - 选择节点列表 / 机场列表\n' +
         '/stats - 统计信息\n' +
@@ -1412,53 +1885,17 @@ async function handleImportCommand(chatId, userId, args, env) {
         }
 
         const input = args.join(' ').trim();
-        let nodeUrls = [];
-
-        // 判断是订阅链接还是 Base64
-        if (input.startsWith('http://') || input.startsWith('https://')) {
-            // 获取订阅内容
+        if (extractHttpUrls(input).length > 0) {
             await sendTelegramMessage(chatId, '⏳ 正在获取订阅内容...', env);
-
-            try {
-                const response = await fetch(input, {
-                    method: 'GET',
-                    headers: {
-                        'User-Agent': 'v2rayN/7.23',
-                        'Accept': '*/*'
-                    }
-                });
-
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}`);
-                }
-
-                const content = await response.text();
-
-                // 尝试 Base64 解码
-                try {
-                    const decoded = decodeURIComponent(escape(atob(content.trim())));
-                    nodeUrls = extractNodeUrls(decoded);
-                } catch {
-                    // 直接尝试提取
-                    nodeUrls = extractNodeUrls(content);
-                }
-
-            } catch (fetchError) {
-                await sendTelegramMessage(chatId, `❌ 获取订阅失败: ${fetchError.message}`, env);
-                return;
-            }
-
-        } else {
-            // 尝试 Base64 解码
-            try {
-                const decoded = decodeURIComponent(escape(atob(input)));
-                nodeUrls = extractNodeUrls(decoded);
-            } catch {
-                // 直接尝试提取
-                nodeUrls = extractNodeUrls(input);
-            }
         }
 
+        let nodeUrls;
+        try {
+            nodeUrls = await resolveTelegramNodeInput(input);
+        } catch (fetchError) {
+            await sendTelegramMessage(chatId, `❌ 获取订阅失败: ${escapeHtml(fetchError.message)}`, env);
+            return;
+        }
         if (nodeUrls.length === 0) {
             await sendTelegramMessage(chatId, '❌ 未识别到有效的节点链接', env);
             return;
@@ -1786,23 +2223,29 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null) {
             return createJsonResponse({ ok: true });
         }
 
-        // 1. 尝试提取节点链接 (SS, VLESS 等)
-        let nodeUrls = extractNodeUrls(text);
-        let importType = 'node'; // node | subscription
-
-        // 2. 如果未识别到节点，检查是否为 HTTP/HTTPS 订阅链接
-        if (nodeUrls.length === 0) {
-            const trimmedText = text.trim();
-            if (/^https?:\/\//i.test(trimmedText)) {
-                // 简单的 URL 验证
+        // HTTP/HTTPS 订阅先展示解析卡片，由按钮决定是否保存。
+        const httpUrls = extractHttpUrls(text);
+        if (httpUrls.length > 0) {
+            for (const url of httpUrls) {
                 try {
-                    new URL(trimmedText);
-                    nodeUrls = [trimmedText];
-                    importType = 'subscription';
-                } catch (e) {
-                    // 无效 URL，忽略
+                    await showSubscriptionPreview(chatId, url, userId, env, cache);
+                } catch (error) {
+                    await sendTelegramMessage(chatId, `❌ 获取订阅失败: ${escapeHtml(error.message)}`, env, { requestCache: cache });
                 }
             }
+
+            // 同一条消息可能还带有直连节点，订阅预览不应吞掉它们。
+            const directNodeUrls = extractNodeUrls(text);
+            if (directNodeUrls.length === 0) return createJsonResponse({ ok: true });
+            text = directNodeUrls.join('\n');
+        }
+        // 1. 普通消息中的节点、Base64 和混合文本统一直接解析。
+        let nodeUrls;
+        try {
+            nodeUrls = await resolveTelegramNodeInput(text);
+        } catch (error) {
+            await sendTelegramMessage(chatId, `❌ 获取订阅失败: ${escapeHtml(error.message)}`, env);
+            return createJsonResponse({ ok: true });
         }
 
         if (nodeUrls.length === 0) {
@@ -2092,6 +2535,78 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
     const data = callbackQuery.data;
 
     try {
+        if (data.startsWith('sp_')) {
+            const match = data.match(/^sp_(refresh|all|b64|yaml|link|save)_(.+)$/);
+            if (!match) {
+                await answerCallbackQuery(callbackQuery.id, '无效操作', env, true);
+                return createJsonResponse({ ok: true });
+            }
+
+            const [, action, sessionId] = match;
+            const cache = requestCache || createRequestCache();
+            const storageAdapter = await getCachedStorageAdapter(env, cache);
+            const session = await readPreviewSession(env, storageAdapter, sessionId, userId);
+            if (!session) {
+                await answerCallbackQuery(callbackQuery.id, '解析结果已过期，请重新发送订阅链接', env, true);
+                return createJsonResponse({ ok: true });
+            }
+
+            if (action === 'refresh') {
+                await answerCallbackQuery(callbackQuery.id, '正在刷新...', env);
+                try {
+                    const refreshedSession = await showSubscriptionPreview(chatId, session.sourceUrl, userId, env, cache, {
+                        sessionId: session.id,
+                        messageId,
+                        savedSubscriptionId: session.savedSubscriptionId
+                    });
+                    if (refreshedSession.savedSubscriptionId) {
+                        await savePreviewSubscription(refreshedSession, userId, env, cache);
+                        await clearAllNodeCaches(storageAdapter).catch(() => {});
+                    }
+                } catch (error) {
+                    await sendTelegramMessage(chatId, `❌ 刷新订阅失败: ${escapeHtml(error.message)}`, env, { requestCache: cache });
+                }
+            } else if (action === 'all') {
+                await answerCallbackQuery(callbackQuery.id, '正在发送全部节点...', env);
+                await sendAllPreviewNodes(chatId, session, env);
+            } else if (action === 'b64') {
+                await answerCallbackQuery(callbackQuery.id, '正在导出 Base64...', env);
+                const raw = session.nodeUrls.join('\n');
+                const encoded = btoa(unescape(encodeURIComponent(raw)));
+                await sendTelegramDocument(chatId, `${session.name}.txt`, encoded, env, `${session.name} · Base64`);
+            } else if (action === 'yaml') {
+                await answerCallbackQuery(callbackQuery.id, '正在导出 YAML...', env);
+                const yaml = generateClashConfig(session.nodeUrls, { addFlagEmoji: true });
+                await sendTelegramDocument(chatId, `${session.name}.yaml`, yaml, env, `${session.name} · Clash YAML`);
+            } else if (action === 'save') {
+                await answerCallbackQuery(callbackQuery.id, '正在保存订阅...', env);
+                const subscription = await savePreviewSubscription(session, userId, env, cache);
+                await clearAllNodeCaches(storageAdapter).catch(() => {});
+                await editTelegramMessage(chatId, messageId, buildSubscriptionPreviewCard(session), env, {
+                    reply_markup: buildSubscriptionPreviewKeyboard(session),
+                    requestCache: cache,
+                    disable_web_page_preview: true
+                });
+                await sendTelegramMessage(chatId, `✅ 已保存订阅：<b>${escapeHtml(subscription.name)}</b>`, env, { requestCache: cache });
+            } else if (action === 'link') {
+                await answerCallbackQuery(callbackQuery.id, '正在生成短链...', env);
+                const subscription = await savePreviewSubscription(session, userId, env, cache);
+                const profile = await ensurePreviewProfile(session, subscription, env, cache);
+                const settings = await getCachedSettings(env, cache);
+                const profileToken = settings.profileToken || 'profiles';
+                const origin = new URL(request.url).origin;
+                const link = `${origin}/${encodeURIComponent(profileToken)}/${encodeURIComponent(profile.customId || profile.id)}`;
+                await editTelegramMessage(chatId, messageId, buildSubscriptionPreviewCard(session), env, {
+                    reply_markup: buildSubscriptionPreviewKeyboard(session),
+                    requestCache: cache,
+                    disable_web_page_preview: true
+                });
+                await sendTelegramMessage(chatId, `🔗 <b>MiSub 订阅链接</b>\n\n<code>${escapeHtml(link)}</code>`, env, { requestCache: cache });
+            }
+
+            return createJsonResponse({ ok: true });
+        }
+
         // 分页命令
         // 分页命令 (格式: list_page_type_page 或 list_page_page 兼容旧版)
         if (data.startsWith('list_page_')) {
