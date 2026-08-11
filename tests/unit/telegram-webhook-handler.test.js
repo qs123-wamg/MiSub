@@ -86,6 +86,18 @@ function createRequest(update, secret = 'secret-token') {
   });
 }
 
+function encodeUtf16Le(value) {
+  const bytes = new Uint8Array(2 + value.length * 2);
+  bytes[0] = 0xff;
+  bytes[1] = 0xfe;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    bytes[2 + index * 2] = code & 0xff;
+    bytes[3 + index * 2] = code >> 8;
+  }
+  return bytes;
+}
+
 describe('handleTelegramWebhook', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -370,6 +382,437 @@ describe('handleTelegramWebhook', () => {
     const body = JSON.parse(global.fetch.mock.calls[0][1].body);
     expect(body.text).toContain('节点添加成功');
   });
+  it('downloads and imports supported Telegram text documents', async () => {
+    const firstNode = 'vless://00000000-0000-4000-8000-000000000011@th.example.com:443?remarks=%E6%B3%B0%E5%9B%BDTH&security=tls';
+    const secondNode = 'vless://00000000-0000-4000-8000-000000000012@sg.example.com:443?remarks=%E6%96%B0%E5%8A%A0%E5%9D%A1SG&security=tls';
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/getFile')) {
+        return new Response(JSON.stringify({ ok: true, result: { file_path: 'documents/nodes.txt' } }), { status: 200 });
+      }
+      if (value.includes('/file/botbot-token/documents/nodes.txt')) {
+        return new Response(`${firstNode}\n${secondNode}\n`, {
+          status: 200,
+          headers: { 'Content-Length': String(firstNode.length + secondNode.length + 2) }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        document: {
+          file_id: 'telegram-file-id',
+          file_name: '笔记 2026年7月27日 18_12_58.txt',
+          file_size: 17084,
+          mime_type: 'text/plain'
+        },
+        chat: { id: 2105 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(2);
+    expect(state.subscriptions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: '泰国TH', url: firstNode }),
+      expect.objectContaining({ name: '新加坡SG', url: secondNode })
+    ]));
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://api.telegram.org/botbot-token/getFile',
+      expect.objectContaining({ method: 'POST' })
+    );
+    const sentBodies = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body));
+    expect(sentBodies.some(body => body.text?.includes('正在解析文件'))).toBe(true);
+    expect(sentBodies.some(body => body.text?.includes('成功添加 2 个项目'))).toBe(true);
+  });
+  it('decodes UTF-16LE Telegram text documents before parsing nodes', async () => {
+    const nodeUrl = 'trojan://password@utf16.example.com:443?security=tls#UTF16-Node';
+    const fileBytes = encodeUtf16Le(`${nodeUrl}\r\n`);
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/getFile')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          result: { file_path: 'documents/utf16.txt', file_size: fileBytes.byteLength }
+        }), { status: 200 });
+      }
+      if (value.includes('/file/botbot-token/documents/utf16.txt')) {
+        return new Response(fileBytes, { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        document: {
+          file_id: 'telegram-utf16-file-id',
+          file_name: 'utf16.txt',
+          file_size: fileBytes.byteLength,
+          mime_type: 'text/plain'
+        },
+        chat: { id: 2105 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(1);
+    expect(state.subscriptions[0]).toMatchObject({ name: 'UTF16-Node', url: nodeUrl });
+  });
+  it('preserves subscription links embedded in descriptive Telegram file text', async () => {
+    const subscriptionUrl = 'https://sub.example.com/from-file';
+    const subscriptionNode = 'trojan://password@subscription.example.com:443?security=tls#Subscription-Node';
+    const directNode = 'vless://00000000-0000-4000-8000-000000000013@direct.example.com:443?security=tls#Direct-Node';
+    const fileContent = `订阅地址：${subscriptionUrl}\n直连节点：${directNode}\n`;
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/getFile')) {
+        return new Response(JSON.stringify({ ok: true, result: { file_path: 'documents/mixed.conf' } }), { status: 200 });
+      }
+      if (value.includes('/file/botbot-token/documents/mixed.conf')) {
+        return new Response(fileContent, { status: 200 });
+      }
+      if (value === subscriptionUrl) {
+        return new Response(btoa(`${subscriptionNode}\n`), {
+          status: 200,
+          headers: { 'Content-Disposition': 'attachment; filename=From-File.yaml' }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        document: {
+          file_id: 'telegram-mixed-file-id',
+          file_name: 'mixed.conf',
+          file_size: fileContent.length,
+          mime_type: 'text/plain'
+        },
+        chat: { id: 2107 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(1);
+    expect(state.subscriptions[0].url).toBe(directNode);
+    expect(global.fetch).toHaveBeenCalledWith(subscriptionUrl, expect.objectContaining({
+      method: 'GET',
+      redirect: 'manual'
+    }));
+    const sentBodies = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body));
+    expect(sentBodies.some(body => body.text?.includes('From-File'))).toBe(true);
+    expect(sentBodies.some(body => body.text?.includes('节点添加成功'))).toBe(true);
+  });
+  it('imports Clash YAML documents through the shared subscription parser', async () => {
+    const yaml = [
+      'proxies:',
+      '  - name: YAML-Node',
+      '    type: vless',
+      '    server: yaml.example.com',
+      '    port: 443',
+      '    uuid: 00000000-0000-4000-8000-000000000014',
+      '    tls: true',
+      'rule-providers:',
+      '  reject:',
+      '    type: http',
+      '    url: https://rules.example.com/reject.yaml'
+    ].join('\n');
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/getFile')) {
+        return new Response(JSON.stringify({ ok: true, result: { file_path: 'documents/nodes.yaml' } }), { status: 200 });
+      }
+      if (value.includes('/file/botbot-token/documents/nodes.yaml')) {
+        return new Response(yaml, { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        document: {
+          file_id: 'telegram-yaml-file-id',
+          file_name: 'nodes.yaml',
+          file_size: yaml.length,
+          mime_type: 'application/yaml'
+        },
+        chat: { id: 2108 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(1);
+    expect(state.subscriptions[0]).toMatchObject({
+      name: 'YAML-Node',
+      url: expect.stringMatching(/^vless:\/\//)
+    });
+    expect(global.fetch.mock.calls.some(([url]) => String(url).includes('rules.example.com'))).toBe(false);
+  });
+  it('imports legacy Clash documents that use the singular Proxy key', async () => {
+    const yaml = [
+      'Proxy:',
+      '  - name: Legacy-YAML-Node',
+      '    type: trojan',
+      '    server: legacy.example.com',
+      '    port: 443',
+      '    password: password',
+      '    sni: legacy.example.com'
+    ].join('\n');
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/getFile')) {
+        return new Response(JSON.stringify({ ok: true, result: { file_path: 'documents/legacy.yaml' } }), { status: 200 });
+      }
+      if (value.includes('/file/botbot-token/documents/legacy.yaml')) {
+        return new Response(yaml, { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        document: {
+          file_id: 'telegram-legacy-yaml-file-id',
+          file_name: 'legacy.yaml',
+          file_size: yaml.length,
+          mime_type: 'application/yaml'
+        },
+        chat: { id: 2108 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(1);
+    expect(state.subscriptions[0]).toMatchObject({
+      name: 'Legacy-YAML-Node',
+      url: expect.stringMatching(/^trojan:\/\//)
+    });
+  });
+  it('imports Clash JSON documents through the shared subscription parser', async () => {
+    const json = JSON.stringify({
+      proxies: [{
+        name: 'JSON-Node',
+        type: 'trojan',
+        server: 'json.example.com',
+        port: 443,
+        password: 'json-password',
+        sni: 'json.example.com'
+      }]
+    });
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/getFile')) {
+        return new Response(JSON.stringify({ ok: true, result: { file_path: 'documents/nodes.json' } }), { status: 200 });
+      }
+      if (value.includes('/file/botbot-token/documents/nodes.json')) {
+        return new Response(json, { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        document: {
+          file_id: 'telegram-json-file-id',
+          file_name: 'nodes.json',
+          file_size: json.length,
+          mime_type: 'application/json'
+        },
+        chat: { id: 2111 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(1);
+    expect(state.subscriptions[0]).toMatchObject({
+      name: 'JSON-Node',
+      url: expect.stringMatching(/^trojan:\/\//)
+    });
+  });
+  it('does not fetch rule URLs from unsupported structured JSON documents', async () => {
+    const ruleUrl = 'https://rules.example.com/geosite.srs';
+    const json = JSON.stringify({
+      outbounds: [{ type: 'selector', tag: 'Proxy', outbounds: ['DIRECT'] }],
+      route: { rule_set: [{ type: 'remote', tag: 'geosite', url: ruleUrl }] }
+    });
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/getFile')) {
+        return new Response(JSON.stringify({ ok: true, result: { file_path: 'documents/singbox.json' } }), { status: 200 });
+      }
+      if (value.includes('/file/botbot-token/documents/singbox.json')) {
+        return new Response(json, { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        document: {
+          file_id: 'telegram-singbox-file-id',
+          file_name: 'singbox.json',
+          file_size: json.length,
+          mime_type: 'application/json'
+        },
+        chat: { id: 2112 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    expect(global.fetch.mock.calls.some(([url]) => String(url) === ruleUrl)).toBe(false);
+    const sentBodies = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body));
+    expect(sentBodies.at(-1).text).toContain('未识别到有效的链接');
+  });
+  it('rejects unsupported Telegram document types before downloading', async () => {
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        document: {
+          file_id: 'telegram-zip-id',
+          file_name: 'nodes.zip',
+          file_size: 1024,
+          mime_type: 'application/zip'
+        },
+        chat: { id: 2106 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(String(global.fetch.mock.calls[0][0])).toContain('/sendMessage');
+    const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(body.text).toContain('仅支持 TXT、YAML、YML、CONF 或 JSON 文件');
+  });
+  it('rejects oversized Telegram documents before requesting file info', async () => {
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        document: {
+          file_id: 'telegram-large-file-id',
+          file_name: 'large.txt',
+          file_size: 5 * 1024 * 1024 + 1,
+          mime_type: 'text/plain'
+        },
+        chat: { id: 2109 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(String(global.fetch.mock.calls[0][0])).toContain('/sendMessage');
+    const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(body.text).toContain('文件超过 5 MB 限制');
+  });
+  it('rejects documents whose getFile metadata reports an oversized payload', async () => {
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url).includes('/getFile')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          result: { file_path: 'documents/actually-large.txt', file_size: 5 * 1024 * 1024 + 1 }
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        document: {
+          file_id: 'telegram-remote-large-file-id',
+          file_name: 'actually-large.txt',
+          file_size: 10,
+          mime_type: 'text/plain'
+        },
+        chat: { id: 2109 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    expect(global.fetch.mock.calls.some(([url]) => String(url).includes('/file/bot'))).toBe(false);
+    const sentBodies = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body));
+    expect(sentBodies.at(-1).text).toContain('文件超过 5 MB 限制');
+  });
+  it('reports Telegram getFile API failures without attempting a download', async () => {
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url).includes('/getFile')) {
+        return new Response(JSON.stringify({ ok: false, description: 'Bad Request: file not found' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        document: {
+          file_id: 'missing-file-id',
+          file_name: 'missing.txt',
+          file_size: 10,
+          mime_type: 'text/plain'
+        },
+        chat: { id: 2110 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    expect(global.fetch.mock.calls.some(([url]) => String(url).includes('/file/bot'))).toBe(false);
+    const sentBodies = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body));
+    expect(sentBodies.at(-1).text).toContain('无法获取 Telegram 文件信息');
+  });
   it('previews subscription URLs and still imports direct nodes from the same message', async () => {
     const subscriptionUrl = 'https://sub.example.com/mixed';
     const subscriptionNode = 'trojan://password@subscription.example.com:443?security=tls#Subscription-Node';
@@ -488,6 +931,7 @@ describe('handleTelegramWebhook', () => {
     expect(body.text).toContain('/delete');
     expect(body.text).toContain('/search');
     expect(body.text).toContain('/sort');
+    expect(body.text).toContain('TXT、YAML、YML、CONF、JSON');
   });
 
   it('shows separate Telegram list entry points instead of mixing manual nodes and airport subscriptions', async () => {
@@ -519,6 +963,204 @@ describe('handleTelegramWebhook', () => {
       expect.objectContaining({ callback_data: 'cmd_list_node' }),
       expect.objectContaining({ callback_data: 'cmd_list_sub' })
     ]));
+  });
+
+  it('renders airport subscriptions as one full-width button per item with status summaries', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const subscriptions = Array.from({ length: 11 }, (_, index) => ({
+      id: `airport-${index + 1}`,
+      name: `Airport ${index + 1}`,
+      url: `https://airport${index + 1}.example/sub`,
+      enabled: index !== 5,
+      userInfo: {
+        upload: 10 * 1024 ** 3,
+        download: 20 * 1024 ** 3,
+        total: (100 + index) * 1024 ** 3,
+        expire: now + (index === 1 ? 7 : 120) * 86400
+      }
+    }));
+    const { adapter } = createState({ subscriptions });
+    createAdapter.mockReturnValue(adapter);
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: '/list sub',
+        chat: { id: 4003 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(body.text).toContain('订阅列表 共11个');
+    expect(body.text).toContain('🟠1个临期');
+    expect(body.text).toContain('第1/2页');
+
+    const rows = body.reply_markup.inline_keyboard;
+    expect(rows.slice(0, 10).every(row => row.length === 1)).toBe(true);
+    expect(rows[0][0]).toMatchObject({ callback_data: 'node_action_sub_0' });
+    expect(rows[0][0].text).toContain('🟢 #1 Airport 1 [70.00 GB] 120天');
+    expect(rows[1][0].text).toContain('🟠 #2 Airport 2 [71.00 GB] 7天');
+    expect(rows[5][0].text).toContain('🟠 #6 Airport 6');
+    expect(rows.flat().some(button => button.text.includes('Airport 11'))).toBe(false);
+    expect(rows.flat()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: '📄 1/2', callback_data: 'noop' }),
+      expect.objectContaining({ text: '➡️', callback_data: 'list_page_sub_1' }),
+      expect.objectContaining({ text: '🔢 跳转页码', callback_data: 'prompt_sub_page' }),
+      expect.objectContaining({ text: '🔄 更新所有', callback_data: 'refresh_all_subs_0' }),
+      expect.objectContaining({ text: '🏠 主菜单', callback_data: 'cmd_menu' })
+    ]));
+
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: '/list sub 2',
+        chat: { id: 4003 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    const secondPageBody = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
+    expect(secondPageBody.text).toContain('第2/2页');
+    expect(secondPageBody.reply_markup.inline_keyboard[0][0]).toMatchObject({
+      text: expect.stringContaining('#11 Airport 11'),
+      callback_data: 'node_action_sub_10'
+    });
+    expect(secondPageBody.reply_markup.inline_keyboard.flat()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: '⬅️', callback_data: 'list_page_sub_0' }),
+      expect.objectContaining({ text: '📄 2/2', callback_data: 'noop' })
+    ]));
+  });
+
+  it('refreshes all enabled airport subscriptions and redraws the current list page', async () => {
+    const subscriptionUrl = 'https://airport.example/refresh-all';
+    const refreshedNode = 'trojan://password@refresh.example.com:443?security=tls#Refreshed-Node';
+    const { state, adapter } = createState({
+      subscriptions: [{
+        id: 'airport-refresh',
+        name: 'Refresh Airport',
+        url: subscriptionUrl,
+        enabled: true,
+        nodeCount: 0,
+        userInfo: null
+      }]
+    });
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url) === subscriptionUrl) {
+        return new Response(btoa(`${refreshedNode}\n`), {
+          status: 200,
+          headers: {
+            'Content-Disposition': 'attachment; filename=Refresh-Airport.yaml',
+            'subscription-userinfo': 'upload=1073741824; download=2147483648; total=107374182400; expire=1798003810'
+          }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'refresh-all-callback',
+        data: 'refresh_all_subs_0',
+        from: { id: 1 },
+        message: { message_id: 89, chat: { id: 4004 } }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions[0]).toMatchObject({
+      nodeCount: 1,
+      userInfo: expect.objectContaining({ total: 107374182400 }),
+      lastError: null,
+      lastUpdate: expect.any(String)
+    });
+    const calls = global.fetch.mock.calls;
+    expect(calls.some(([url]) => String(url) === subscriptionUrl)).toBe(true);
+    const editBody = calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(editBody.text).toContain('订阅列表 共1个');
+    expect(editBody.reply_markup.inline_keyboard[0][0].text).toContain('[97.00 GB]');
+    const sentBodies = calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body));
+    expect(sentBodies.at(-1).text).toContain('更新完成：成功 1 个，失败 0 个');
+  });
+  it('clears stale traffic metadata when a successful refresh omits the user-info header', async () => {
+    const subscriptionUrl = 'https://airport.example/without-user-info';
+    const refreshedNode = 'trojan://password@fresh.example.com:443?security=tls#Fresh-Node';
+    const { state, adapter } = createState({
+      subscriptions: [{
+        id: 'airport-stale-traffic',
+        name: 'Stale Traffic Airport',
+        url: subscriptionUrl,
+        enabled: true,
+        nodeCount: 99,
+        userInfo: { upload: 10, download: 20, total: 1000, expire: 1798003810 }
+      }]
+    });
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url) === subscriptionUrl) {
+        return new Response(btoa(`${refreshedNode}\n`), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'refresh-without-user-info',
+        data: 'refresh_all_subs_0',
+        from: { id: 1 },
+        message: { message_id: 90, chat: { id: 4004 } }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions[0]).toMatchObject({
+      nodeCount: 1,
+      userInfo: null,
+      lastError: null,
+      lastUpdate: expect.any(String)
+    });
+  });
+  it('uses each subscription custom user-agent during bulk refresh', async () => {
+    const subscriptionUrl = 'https://airport.example/custom-user-agent';
+    const customUserAgent = 'ClashMetaForAndroid/2.11.6';
+    const refreshedNode = 'trojan://password@ua.example.com:443?security=tls#UA-Node';
+    const { adapter } = createState({
+      subscriptions: [{
+        id: 'airport-custom-user-agent',
+        name: 'Custom UA Airport',
+        url: subscriptionUrl,
+        enabled: true,
+        customUserAgent
+      }]
+    });
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async (url, options) => {
+      if (String(url) === subscriptionUrl) {
+        expect(options.headers['User-Agent']).toBe(customUserAgent);
+        return new Response(btoa(`${refreshedNode}\n`), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'refresh-with-custom-user-agent',
+        data: 'refresh_all_subs_0',
+        from: { id: 1 },
+        message: { message_id: 91, chat: { id: 4004 } }
+      }
+    }), { MISUB_KV: null });
+
+    expect(global.fetch.mock.calls.some(([url]) => String(url) === subscriptionUrl)).toBe(true);
   });
 
   it('opens an airport subscription from an old mixed /list callback index instead of reporting object missing', async () => {

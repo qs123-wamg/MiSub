@@ -160,11 +160,11 @@ export function extractValidNodes(text) {
     // 1. 尝试解析为 Clash YAML
     // 只有当包含 proxies 关键字时才尝试，避免普通文本解析报错
     const lowerText = text.toLowerCase();
-    if (/\bproxies\s*:/.test(lowerText)) {
+    if (/(?:^|[\s{,])["']?(?:proxies|proxy)["']?\s*:/.test(lowerText)) {
         try {
             const yamlObj = yaml.load(text);
-            // 兼容 proxies 和 Proxy 字段
-            const proxies = yamlObj.proxies || yamlObj.Proxy;
+            // 兼容新旧 Clash 配置及字段大小写变体
+            const proxies = yamlObj.proxies || yamlObj.Proxies || yamlObj.Proxy || yamlObj.proxy;
 
             if (Array.isArray(proxies)) {
                 proxies.forEach(proxy => {

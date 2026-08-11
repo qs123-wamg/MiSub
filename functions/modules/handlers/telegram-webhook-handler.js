@@ -38,6 +38,9 @@ const TELEGRAM_PREVIEW_NODE_LIMIT = 20;
 const TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT = 240;
 const TELEGRAM_PREVIEW_MESSAGE_LIMIT = 3900;
 const TELEGRAM_SUBSCRIPTION_TIMEOUT_MS = 18000;
+const TELEGRAM_SUBSCRIPTION_LIST_PAGE_SIZE = 10;
+const TELEGRAM_SUBSCRIPTION_EXPIRING_DAYS = 30;
+const TELEGRAM_IMPORT_FILE_EXTENSIONS = new Set(['.txt', '.yaml', '.yml', '.conf', '.json']);
 
 // ==================== 存储与配置 ====================
 
@@ -164,6 +167,13 @@ function extractNodeName(url) {
                 return encoded;
             }
         }
+        try {
+            const parsedUrl = new URL(url);
+            for (const key of ['remarks', 'name', 'ps', 'tag']) {
+                const name = parsedUrl.searchParams.get(key)?.trim();
+                if (name) return name;
+            }
+        } catch {}
         const protocol = url.split('://')[0].toUpperCase();
         return `${protocol} 节点`;
     } catch {
@@ -239,17 +249,28 @@ function getSubscriptionDisplayName(filename, sourceUrl) {
     try { return new URL(sourceUrl).hostname; } catch { return '未命名订阅'; }
 }
 
-async function readSubscriptionResponseText(response) {
+function decodeTextBytes(bytes) {
+    const content = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    if (content.length >= 2 && content[0] === 0xff && content[1] === 0xfe) {
+        return new TextDecoder('utf-16le').decode(content);
+    }
+    if (content.length >= 2 && content[0] === 0xfe && content[1] === 0xff) {
+        return new TextDecoder('utf-16be').decode(content);
+    }
+    return new TextDecoder('utf-8').decode(content);
+}
+
+async function readSubscriptionResponseText(response, contentLabel = '订阅内容') {
     const maxBytes = JSON_BODY_LIMITS.large;
     const contentLength = Number(response.headers.get('Content-Length') || 0);
     if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-        throw new Error('订阅内容超过 5 MB 限制');
+        throw new Error(`${contentLabel}超过 5 MB 限制`);
     }
 
     if (!response.body?.getReader) {
         const buffer = await response.arrayBuffer();
-        if (buffer.byteLength > maxBytes) throw new Error('订阅内容超过 5 MB 限制');
-        return new TextDecoder('utf-8').decode(buffer);
+        if (buffer.byteLength > maxBytes) throw new Error(`${contentLabel}超过 5 MB 限制`);
+        return decodeTextBytes(buffer);
     }
 
     const reader = response.body.getReader();
@@ -262,7 +283,7 @@ async function readSubscriptionResponseText(response) {
         totalBytes += value.byteLength;
         if (totalBytes > maxBytes) {
             await reader.cancel().catch(() => {});
-            throw new Error('订阅内容超过 5 MB 限制');
+            throw new Error(`${contentLabel}超过 5 MB 限制`);
         }
         chunks.push(value);
     }
@@ -273,12 +294,90 @@ async function readSubscriptionResponseText(response) {
         bytes.set(chunk, offset);
         offset += chunk.byteLength;
     }
-    return new TextDecoder('utf-8').decode(bytes);
+    return decodeTextBytes(bytes);
 }
 
-async function fetchSubscriptionPreview(url) {
+function validateTelegramImportDocument(document) {
+    const filename = String(document?.file_name || '').trim();
+    const extension = filename.includes('.') ? filename.slice(filename.lastIndexOf('.')).toLowerCase() : '';
+    if (!TELEGRAM_IMPORT_FILE_EXTENSIONS.has(extension)) {
+        throw new Error('仅支持 TXT、YAML、YML、CONF 或 JSON 文件');
+    }
+
+    const fileSize = Number(document?.file_size || 0);
+    if (Number.isFinite(fileSize) && fileSize > JSON_BODY_LIMITS.large) {
+        throw new Error('文件超过 5 MB 限制');
+    }
+    if (!document?.file_id) throw new Error('文件标识无效');
+    return filename;
+}
+
+function prepareTelegramDocumentInput(text) {
+    const content = String(text || '');
+    const parsedNodes = extractValidNodes(content);
+    const embeddedNodeUrls = extractNodeUrls(content);
+    const isStructuredConfig = /(?:^|[\s{,])["']?(?:proxies|proxy|outbounds)["']?\s*:/i.test(content)
+        || /^\s*\[(?:Proxy|Proxy Group)\]\s*$/im.test(content)
+        || parsedNodes.some(nodeUrl => !embeddedNodeUrls.includes(nodeUrl));
+
+    return isStructuredConfig ? parsedNodes.join('\n') : content;
+}
+
+function normalizeTelegramFilePath(value) {
+    const filePath = String(value || '').trim();
+    const segments = filePath.split('/');
+    if (
+        !filePath ||
+        filePath.length > 1024 ||
+        segments.some(segment => !segment || segment === '.' || segment === '..' || !/^[a-zA-Z0-9_.-]+$/.test(segment))
+    ) {
+        throw new Error('Telegram 文件路径无效');
+    }
+    return segments.map(encodeURIComponent).join('/');
+}
+
+async function fetchTelegramDocumentText(document, env, requestCache = null) {
+    validateTelegramImportDocument(document);
+    const config = await getTelegramPushConfig(env, requestCache);
+    if (!config.bot_token) throw new Error('Bot token 未配置');
+
+    const fileInfoResponse = await createTimeoutFetch(
+        `https://api.telegram.org/bot${config.bot_token}/getFile`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file_id: document.file_id })
+        },
+        TELEGRAM_SUBSCRIPTION_TIMEOUT_MS
+    );
+    if (!fileInfoResponse.ok) throw new Error(`无法获取 Telegram 文件信息: HTTP ${fileInfoResponse.status}`);
+
+    let fileInfo;
+    try {
+        fileInfo = await fileInfoResponse.json();
+    } catch {
+        throw new Error('Telegram 文件信息响应无效');
+    }
+    if (!fileInfo?.ok) throw new Error('无法获取 Telegram 文件信息');
+    const remoteFileSize = Number(fileInfo?.result?.file_size || 0);
+    if (Number.isFinite(remoteFileSize) && remoteFileSize > JSON_BODY_LIMITS.large) {
+        throw new Error('文件超过 5 MB 限制');
+    }
+
+    const encodedPath = normalizeTelegramFilePath(fileInfo?.result?.file_path);
+    const fileResponse = await createTimeoutFetch(
+        `https://api.telegram.org/file/bot${config.bot_token}/${encodedPath}`,
+        { method: 'GET' },
+        TELEGRAM_SUBSCRIPTION_TIMEOUT_MS
+    );
+    if (!fileResponse.ok) throw new Error(`Telegram 文件下载失败: HTTP ${fileResponse.status}`);
+    return readSubscriptionResponseText(fileResponse, '文件');
+}
+
+async function fetchSubscriptionPreview(url, options = {}) {
     const maxRedirects = 3;
     let currentUrl = assertPublicNetworkUrl(url).toString();
+    const userAgent = String(options.userAgent || '').trim() || TELEGRAM_SUBSCRIPTION_USER_AGENT;
 
     for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount++) {
         let response;
@@ -287,7 +386,7 @@ async function fetchSubscriptionPreview(url) {
                 method: 'GET',
                 redirect: 'manual',
                 headers: {
-                    'User-Agent': TELEGRAM_SUBSCRIPTION_USER_AGENT,
+                    'User-Agent': userAgent,
                     'Accept': '*/*'
                 }
             }, TELEGRAM_SUBSCRIPTION_TIMEOUT_MS);
@@ -396,6 +495,60 @@ function formatRemainingTime(expireSeconds) {
     const hours = totalHours % 24;
     const minutes = Math.floor((remainingMs % 3600000) / 60000);
     return `${days}天${hours}小时${minutes}分钟`;
+}
+
+function formatSubscriptionListTraffic(value) {
+    const bytes = Number(value || 0);
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    let size = bytes;
+    let unitIndex = 0;
+    while (size >= 1024 && unitIndex < units.length - 1) {
+        size /= 1024;
+        unitIndex++;
+    }
+    return unitIndex === 0 ? `${Math.round(size)} B` : `${size.toFixed(2)} ${units[unitIndex]}`;
+}
+
+function getSubscriptionExpirySummary(expireSeconds) {
+    const expire = Number(expireSeconds || 0);
+    if (!Number.isFinite(expire) || expire <= 0) return { text: '未知', expiring: false, expired: false };
+
+    const expireDate = new Date(expire * 1000);
+    if (!Number.isFinite(expireDate.getTime())) return { text: '未知', expiring: false, expired: false };
+    if (expireDate.getUTCFullYear() >= 2099) return { text: '长期有效', expiring: false, expired: false };
+
+    const remainingMs = expire * 1000 - Date.now();
+    if (remainingMs <= 0) return { text: '已到期', expiring: false, expired: true };
+
+    const days = Math.ceil(remainingMs / 86400000);
+    return {
+        text: `${days}天`,
+        expiring: days <= TELEGRAM_SUBSCRIPTION_EXPIRING_DAYS,
+        expired: false
+    };
+}
+
+function getSubscriptionListSummary(subscription) {
+    const info = subscription?.userInfo || {};
+    const total = normalizeTrafficBytes(info.total);
+    const used = normalizeTrafficBytes(info.upload) + normalizeTrafficBytes(info.download);
+    const remaining = Math.max(0, total - used);
+    const expiry = getSubscriptionExpirySummary(info.expire);
+    const depleted = total > 0 && remaining <= 0;
+
+    let status = '🟢';
+    if (subscription?.enabled === false) status = '🟠';
+    else if (expiry.expired) status = '🔴';
+    else if (expiry.expiring || depleted) status = '🟠';
+
+    return {
+        status,
+        traffic: formatSubscriptionListTraffic(remaining),
+        expiry: expiry.text,
+        expiring: expiry.expiring
+    };
 }
 
 function getPreviewSessionKey(sessionId) {
@@ -934,7 +1087,8 @@ async function handleStartCommand(chatId, env) {
         '• 📤 快速添加代理节点\n' +
         '• 📋 管理你的节点列表\n' +
         '• 🔗 获取订阅链接\n\n' +
-        '直接发送订阅链接、Base64 文本或节点链接即可解析并添加。\n\n' +
+        '直接发送订阅链接、Base64 文本、节点链接或配置文件即可解析并添加。\n' +
+        '支持 TXT、YAML、YML、CONF、JSON 文件（最大 5 MB）。\n\n' +
         '发送 /help 查看完整命令列表\n' +
         '发送 /menu 打开快捷菜单';
 
@@ -948,7 +1102,8 @@ async function handleHelpCommand(chatId, env) {
     const message =
         '📖 <b>MiSub Bot 命令帮助</b>\n\n' +
         '<b>📤 解析并添加</b>\n' +
-        '直接发送订阅链接、Base64 文本或节点链接（支持批量）\n\n' +
+        '直接发送订阅链接、Base64 文本或节点链接（支持批量）\n' +
+        '也可发送 TXT、YAML、YML、CONF、JSON 文件（最大 5 MB）\n\n' +
         '<b>📋 查看</b>\n' +
         '/list - 选择节点列表 / 机场列表\n' +
         '/stats - 统计信息\n' +
@@ -1009,6 +1164,87 @@ async function handleMenuCommand(chatId, env, messageId = null, requestCache = n
     }
 }
 
+async function renderTelegramSubscriptionList(chatId, subscriptions, env, page = 0, messageId = null, requestCache = null) {
+    const totalPages = Math.max(1, Math.ceil(subscriptions.length / TELEGRAM_SUBSCRIPTION_LIST_PAGE_SIZE));
+    const currentPage = Math.min(Math.max(0, page), totalPages - 1);
+    const startIdx = currentPage * TELEGRAM_SUBSCRIPTION_LIST_PAGE_SIZE;
+    const endIdx = Math.min(startIdx + TELEGRAM_SUBSCRIPTION_LIST_PAGE_SIZE, subscriptions.length);
+    const expiringCount = subscriptions.reduce((count, subscription) => (
+        count + (getSubscriptionListSummary(subscription).expiring ? 1 : 0)
+    ), 0);
+
+    const message = `📂 订阅列表 共${subscriptions.length}个 | 🟠${expiringCount}个临期 | 第${currentPage + 1}/${totalPages}页`;
+    const rows = [];
+
+    for (let i = startIdx; i < endIdx; i++) {
+        const subscription = subscriptions[i];
+        const summary = getSubscriptionListSummary(subscription);
+        const name = truncateTelegramText(subscription.name || '未命名订阅', 32);
+        rows.push([{
+            text: `${summary.status} #${i + 1} ${name} [${summary.traffic}] ${summary.expiry}`,
+            callback_data: `node_action_sub_${i}`
+        }]);
+    }
+
+    const paginationRow = [];
+    if (currentPage > 0) {
+        paginationRow.push({ text: '⬅️', callback_data: `list_page_sub_${currentPage - 1}` });
+    }
+    paginationRow.push({ text: `📄 ${currentPage + 1}/${totalPages}`, callback_data: 'noop' });
+    if (currentPage < totalPages - 1) {
+        paginationRow.push({ text: '➡️', callback_data: `list_page_sub_${currentPage + 1}` });
+    }
+    rows.push(paginationRow);
+    rows.push([
+        { text: '🔢 跳转页码', callback_data: 'prompt_sub_page' },
+        { text: '🔄 更新所有', callback_data: `refresh_all_subs_${currentPage}` }
+    ]);
+    rows.push([{ text: '🏠 主菜单', callback_data: 'cmd_menu' }]);
+
+    const options = { requestCache, reply_markup: { inline_keyboard: rows } };
+    if (messageId) {
+        await editTelegramMessage(chatId, messageId, message, env, options);
+    } else {
+        await sendTelegramMessage(chatId, message, env, options);
+    }
+}
+
+async function refreshTelegramSubscriptions(env, requestCache = null) {
+    const cache = requestCache || createRequestCache();
+    const subscriptions = await getCachedSubscriptions(env, cache);
+    const targets = subscriptions.filter(subscription => (
+        subscription?.enabled !== false && /^https?:\/\//i.test(subscription?.url || '')
+    ));
+
+    let cursor = 0;
+    let success = 0;
+    let failed = 0;
+    const worker = async () => {
+        while (cursor < targets.length) {
+            const subscription = targets[cursor++];
+            try {
+                const preview = await fetchSubscriptionPreview(subscription.url, {
+                    userAgent: subscription.customUserAgent || subscription.userAgent
+                });
+                if (preview.nodeUrls.length === 0) throw new Error('未识别到有效节点');
+                subscription.nodeCount = preview.nodeUrls.length;
+                subscription.userInfo = preview.userInfo || null;
+                subscription.lastUpdate = new Date().toISOString();
+                subscription.lastError = null;
+                success++;
+            } catch (error) {
+                subscription.lastError = error.message || '更新失败';
+                failed++;
+            }
+        }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => worker()));
+    cache.subscriptions = subscriptions;
+    await persistCachedSubscriptions(env, cache);
+    return { total: targets.length, success, failed };
+}
+
 /**
  * 处理 /list 命令 - 节点列表（带分页和操作按钮）
  */
@@ -1052,6 +1288,11 @@ async function handleListCommand(chatId, userId, env, page = 0, type = 'all', me
             } else {
                 await sendTelegramMessage(chatId, emptyMsg, env);
             }
+            return;
+        }
+
+        if (type === 'sub') {
+            await renderTelegramSubscriptionList(chatId, userNodes, env, page, messageId, cache);
             return;
         }
 
@@ -2211,16 +2452,18 @@ async function handleUnbindCommand(chatId, userId, env, requestCache = null) {
 /**
  * 处理节点输入（核心逻辑）
  */
-async function handleNodeInput(chatId, text, userId, env, requestCache = null) {
+async function handleNodeInput(chatId, text, userId, env, requestCache = null, options = {}) {
     try {
         const cache = requestCache || createRequestCache();
         const config = await getTelegramPushConfig(env, cache);
 
         // 检查频率限制
-        const rateLimitCheck = await checkRateLimit(userId, env, config);
-        if (!rateLimitCheck.allowed) {
-            await sendTelegramMessage(chatId, `❌ ${rateLimitCheck.reason}`, env);
-            return createJsonResponse({ ok: true });
+        if (!options.rateLimitChecked) {
+            const rateLimitCheck = await checkRateLimit(userId, env, config);
+            if (!rateLimitCheck.allowed) {
+                await sendTelegramMessage(chatId, `❌ ${rateLimitCheck.reason}`, env);
+                return createJsonResponse({ ok: true });
+            }
         }
 
         // HTTP/HTTPS 订阅先展示解析卡片，由按钮决定是否保存。
@@ -2410,6 +2653,33 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null) {
     }
 }
 
+async function handleTelegramDocumentInput(chatId, document, userId, env, requestCache = null) {
+    const cache = requestCache || createRequestCache();
+    try {
+        const filename = validateTelegramImportDocument(document);
+        const config = await getTelegramPushConfig(env, cache);
+        const rateLimitCheck = await checkRateLimit(userId, env, config);
+        if (!rateLimitCheck.allowed) {
+            await sendTelegramMessage(chatId, `❌ ${rateLimitCheck.reason}`, env, { requestCache: cache });
+            return createJsonResponse({ ok: true });
+        }
+
+        await sendTelegramMessage(
+            chatId,
+            `⏳ 正在解析文件：<b>${escapeHtml(truncateTelegramText(filename, 120))}</b>`,
+            env,
+            { requestCache: cache }
+        );
+        const text = await fetchTelegramDocumentText(document, env, cache);
+        const input = prepareTelegramDocumentInput(text);
+        return handleNodeInput(chatId, input, userId, env, cache, { rateLimitChecked: true });
+    } catch (error) {
+        console.error('[Telegram Push] Document import failed:', error);
+        await sendTelegramMessage(chatId, `❌ 文件解析失败: ${escapeHtml(error.message)}`, env, { requestCache: cache });
+        return createJsonResponse({ ok: true });
+    }
+}
+
 // ==================== 命令路由 ====================
 
 /**
@@ -2435,9 +2705,11 @@ async function handleCommand(chatId, text, userId, env, request, requestCache = 
 
         case '/list':
             if (args[0]?.toLowerCase() === 'node' || args[0] === '节点') {
-                await handleListCommand(chatId, userId, env, 0, 'node', null, requestCache);
+                const page = Math.max(0, Number.parseInt(args[1], 10) - 1 || 0);
+                await handleListCommand(chatId, userId, env, page, 'node', null, requestCache);
             } else if (['sub', 'airport', 'subscription', '订阅', '机场'].includes(args[0]?.toLowerCase())) {
-                await handleListCommand(chatId, userId, env, 0, 'sub', null, requestCache);
+                const page = Math.max(0, Number.parseInt(args[1], 10) - 1 || 0);
+                await handleListCommand(chatId, userId, env, page, 'sub', null, requestCache);
             } else {
                 await handleListTypeSelector(chatId, env, null, requestCache);
             }
@@ -2623,6 +2895,34 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
 
             await answerCallbackQuery(callbackQuery.id, '', env);
             await handleListCommand(chatId, userId, env, page, type, messageId, requestCache);
+            return createJsonResponse({ ok: true });
+        }
+
+        if (data === 'noop') {
+            await answerCallbackQuery(callbackQuery.id, '', env);
+            return createJsonResponse({ ok: true });
+        }
+
+        if (data === 'prompt_sub_page') {
+            await answerCallbackQuery(callbackQuery.id, '请发送 /list sub 页码', env, true);
+            return createJsonResponse({ ok: true });
+        }
+
+        if (data.startsWith('refresh_all_subs_')) {
+            const page = Math.max(0, Number.parseInt(data.replace('refresh_all_subs_', ''), 10) || 0);
+            await answerCallbackQuery(callbackQuery.id, '正在更新所有订阅...', env);
+            try {
+                const result = await refreshTelegramSubscriptions(env, requestCache);
+                await handleListCommand(chatId, userId, env, page, 'sub', messageId, requestCache);
+                await sendTelegramMessage(
+                    chatId,
+                    `🔄 更新完成：成功 ${result.success} 个，失败 ${result.failed} 个`,
+                    env,
+                    { requestCache }
+                );
+            } catch (error) {
+                await sendTelegramMessage(chatId, `❌ 更新订阅失败: ${escapeHtml(error.message)}`, env, { requestCache });
+            }
             return createJsonResponse({ ok: true });
         }
 
@@ -3273,11 +3573,7 @@ export async function handleTelegramWebhook(request, env) {
             const message = update.message;
             const userId = message.from.id;
             const chatId = message.chat.id;
-            const text = message.text;
-
-            if (!text) {
-                return createJsonResponse({ ok: true });
-            }
+            const text = message.text || message.caption || '';
 
             // 检查用户权限
             const permissionCheck = checkUserPermission(userId, config);
@@ -3285,6 +3581,12 @@ export async function handleTelegramWebhook(request, env) {
                 await sendTelegramMessage(chatId, `❌ ${permissionCheck.reason}`, env);
                 return createJsonResponse({ ok: true });
             }
+
+            if (message.document) {
+                return await handleTelegramDocumentInput(chatId, message.document, userId, env, requestCache);
+            }
+
+            if (!text) return createJsonResponse({ ok: true });
 
             // 处理命令或节点输入
             if (text.startsWith('/')) {
