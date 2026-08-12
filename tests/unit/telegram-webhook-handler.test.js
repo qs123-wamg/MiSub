@@ -427,11 +427,13 @@ describe('handleTelegramWebhook', () => {
       }
     }), { MISUB_KV: null });
 
-    expect(state.subscriptions).toHaveLength(2);
-    expect(state.subscriptions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: '泰国TH', url: firstNode }),
-      expect.objectContaining({ name: '新加坡SG', url: secondNode })
-    ]));
+    expect(state.subscriptions).toHaveLength(1);
+    expect(state.subscriptions[0]).toMatchObject({
+      type: 'inline',
+      name: '笔记 2026年7月27日 18_12_58',
+      nodeUrls: [firstNode, secondNode],
+      nodeCount: 2
+    });
     expect(global.fetch).toHaveBeenCalledWith(
       'https://api.telegram.org/botbot-token/getFile',
       expect.objectContaining({ method: 'POST' })
@@ -440,7 +442,7 @@ describe('handleTelegramWebhook', () => {
       .filter(([url]) => String(url).includes('/sendMessage'))
       .map(([, options]) => JSON.parse(options.body));
     expect(sentBodies.some(body => body.text?.includes('正在解析文件'))).toBe(true);
-    expect(sentBodies.some(body => body.text?.includes('成功添加 2 个项目'))).toBe(true);
+    expect(sentBodies.some(body => body.text?.includes('订阅源添加成功'))).toBe(true);
   });
   it('decodes UTF-16LE Telegram text documents before parsing nodes', async () => {
     const nodeUrl = 'trojan://password@utf16.example.com:443?security=tls#UTF16-Node';
@@ -477,7 +479,12 @@ describe('handleTelegramWebhook', () => {
     }), { MISUB_KV: null });
 
     expect(state.subscriptions).toHaveLength(1);
-    expect(state.subscriptions[0]).toMatchObject({ name: 'UTF16-Node', url: nodeUrl });
+    expect(state.subscriptions[0]).toMatchObject({
+      type: 'inline',
+      name: 'utf16',
+      nodeUrls: [nodeUrl],
+      nodeCount: 1
+    });
   });
   it('preserves subscription links embedded in descriptive Telegram file text', async () => {
     const subscriptionUrl = 'https://sub.example.com/from-file';
@@ -519,7 +526,12 @@ describe('handleTelegramWebhook', () => {
     }), { MISUB_KV: null });
 
     expect(state.subscriptions).toHaveLength(1);
-    expect(state.subscriptions[0].url).toBe(directNode);
+    expect(state.subscriptions[0]).toMatchObject({
+      type: 'inline',
+      name: 'mixed',
+      nodeUrls: [directNode, subscriptionNode],
+      nodeCount: 2
+    });
     expect(global.fetch).toHaveBeenCalledWith(subscriptionUrl, expect.objectContaining({
       method: 'GET',
       redirect: 'manual'
@@ -527,8 +539,10 @@ describe('handleTelegramWebhook', () => {
     const sentBodies = global.fetch.mock.calls
       .filter(([url]) => String(url).includes('/sendMessage'))
       .map(([, options]) => JSON.parse(options.body));
-    expect(sentBodies.some(body => body.text?.includes('From-File'))).toBe(true);
-    expect(sentBodies.some(body => body.text?.includes('节点添加成功'))).toBe(true);
+    expect(sentBodies.some(body => (
+      body.text?.includes('订阅源添加成功')
+      && body.text?.includes('内嵌订阅 · 2 节点')
+    ))).toBe(true);
   });
   it('imports Clash YAML documents through the shared subscription parser', async () => {
     const yaml = [
@@ -574,9 +588,12 @@ describe('handleTelegramWebhook', () => {
 
     expect(state.subscriptions).toHaveLength(1);
     expect(state.subscriptions[0]).toMatchObject({
-      name: 'YAML-Node',
-      url: expect.stringMatching(/^vless:\/\//)
+      type: 'inline',
+      name: 'nodes',
+      url: expect.stringMatching(/^inline:/),
+      nodeCount: 1
     });
+    expect(state.subscriptions[0].nodeUrls).toEqual([expect.stringMatching(/^vless:/)]);
     expect(global.fetch.mock.calls.some(([url]) => String(url).includes('rules.example.com'))).toBe(false);
   });
   it('imports legacy Clash documents that use the singular Proxy key', async () => {
@@ -619,9 +636,12 @@ describe('handleTelegramWebhook', () => {
 
     expect(state.subscriptions).toHaveLength(1);
     expect(state.subscriptions[0]).toMatchObject({
-      name: 'Legacy-YAML-Node',
-      url: expect.stringMatching(/^trojan:\/\//)
+      type: 'inline',
+      name: 'legacy',
+      url: expect.stringMatching(/^inline:/),
+      nodeCount: 1
     });
+    expect(state.subscriptions[0].nodeUrls).toEqual([expect.stringMatching(/^trojan:/)]);
   });
   it('imports Clash JSON documents through the shared subscription parser', async () => {
     const json = JSON.stringify({
@@ -664,9 +684,12 @@ describe('handleTelegramWebhook', () => {
 
     expect(state.subscriptions).toHaveLength(1);
     expect(state.subscriptions[0]).toMatchObject({
-      name: 'JSON-Node',
-      url: expect.stringMatching(/^trojan:\/\//)
+      type: 'inline',
+      name: 'nodes',
+      url: expect.stringMatching(/^inline:/),
+      nodeCount: 1
     });
+    expect(state.subscriptions[0].nodeUrls).toEqual([expect.stringMatching(/^trojan:/)]);
   });
   it('does not fetch rule URLs from unsupported structured JSON documents', async () => {
     const ruleUrl = 'https://rules.example.com/geosite.srs';

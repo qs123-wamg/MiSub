@@ -29,7 +29,7 @@ import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS } from '../config.js';
 import { assertPublicNetworkUrl } from '../security-utils.js';
 import { extractValidNodes, parseNodeList } from '../utils/node-parser.js';
 import { getRegionEmoji } from '../utils/geo-utils.js';
-import { buildSubscriptionNodeCacheKey, isRealProxyNode, parseSubscriptionUserInfoHeader } from '../../services/subscription-service.js';
+import { buildSubscriptionNodeCacheKey, isRealProxyNode, isRemoteSubscription, isSubscriptionEntry, parseSubscriptionUserInfoHeader } from '../../services/subscription-service.js';
 import { generateClashConfig } from '../../utils/url-to-clash.js';
 const TELEGRAM_SUBSCRIPTION_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const TELEGRAM_PREVIEW_SESSION_PREFIX = 'tg_subscription_preview:';
@@ -248,6 +248,11 @@ function getSubscriptionDisplayName(filename, sourceUrl) {
     const withoutExtension = String(filename || '').replace(/\.(ya?ml|txt|conf|json)$/i, '').trim();
     if (withoutExtension) return withoutExtension;
     try { return new URL(sourceUrl).hostname; } catch { return '未命名订阅'; }
+}
+
+function getInlineSubscriptionName(filename) {
+    const name = getSubscriptionDisplayName(filename, '');
+    return name === '未命名订阅' ? 'Telegram 多节点订阅' : name;
 }
 
 function getSubscriptionUrlHostname(url) {
@@ -716,12 +721,14 @@ function buildStoredSubscriptionDetailCard(session) {
     const used = upload + download;
     const remaining = Math.max(0, total - used);
     const usagePercent = total > 0 ? Math.min(100, (used / total) * 100) : 0;
-    const sourceUrl = truncateTelegramText(session.sourceUrl, 360);
+    const sourceUrl = session.isRemote
+        ? truncateTelegramText(session.sourceUrl, 360)
+        : '本地内嵌订阅';
     const name = truncateTelegramText(session.name || '未命名订阅', 120);
 
     let message = `<b>编号:</b> #${Number(session.subscriptionIndex || 0) + 1}\n`;
     message += `<b>配置名称:</b> ${escapeHtml(name)}\n`;
-    message += `<b>订阅链接:</b>\n<code>${escapeHtml(sourceUrl)}</code>\n`;
+    message += `<b>订阅来源:</b>\n<code>${escapeHtml(sourceUrl)}</code>\n`;
 
     if (total > 0) {
         message += `<blockquote><b>流量详情:</b> ${formatSubscriptionListTraffic(used)} / ${formatSubscriptionListTraffic(total)}\n`;
@@ -755,12 +762,15 @@ function buildStoredSubscriptionDetailCard(session) {
 }
 
 function buildStoredSubscriptionDetailKeyboard(session) {
+    const firstRow = session.isRemote
+        ? [
+            { text: '🔄 刷新订阅', callback_data: `sd_refresh_${session.id}` },
+            { text: '🗑️ 删除订阅', callback_data: `sd_delete_${session.id}` }
+        ]
+        : [{ text: '🗑️ 删除订阅', callback_data: `sd_delete_${session.id}` }];
     return {
         inline_keyboard: [
-            [
-                { text: '🔄 刷新订阅', callback_data: `sd_refresh_${session.id}` },
-                { text: '🗑️ 删除订阅', callback_data: `sd_delete_${session.id}` }
-            ],
+            firstRow,
             [
                 { text: '📦 导出节点', callback_data: `sd_export_${session.id}` },
                 { text: '🔗 生成短链', callback_data: `sd_link_${session.id}` }
@@ -780,7 +790,7 @@ async function resolveTelegramSubscriptionSelection(userId, rawIndex, env, cache
     const visibleItems = permission.allowed
         ? subscriptions
         : subscriptions.filter(item => item.source === 'telegram' && item.telegram_user_id === userId);
-    const visibleSubscriptions = visibleItems.filter(item => /^https?:\/\//i.test(item?.url || ''));
+    const visibleSubscriptions = visibleItems.filter(isSubscriptionEntry);
 
     // Compatibility for list buttons emitted before the callback format was versioned.
     if (rawIndex >= 0 && rawIndex < visibleSubscriptions.length) {
@@ -788,7 +798,7 @@ async function resolveTelegramSubscriptionSelection(userId, rawIndex, env, cache
     }
 
     const legacyItem = visibleItems[rawIndex];
-    if (!legacyItem || !/^https?:\/\//i.test(legacyItem.url || '')) return null;
+    if (!legacyItem || !isSubscriptionEntry(legacyItem)) return null;
     const index = visibleSubscriptions.findIndex(item => (
         legacyItem.id ? item.id === legacyItem.id : item === legacyItem || item.url === legacyItem.url
     ));
@@ -802,7 +812,7 @@ async function resolveTelegramSubscriptionListSelection(userId, rawIndex, env, c
     const visibleItems = permission.allowed
         ? subscriptions
         : subscriptions.filter(item => item.source === 'telegram' && item.telegram_user_id === userId);
-    const visibleSubscriptions = visibleItems.filter(item => /^https?:\/\//i.test(item?.url || ''));
+    const visibleSubscriptions = visibleItems.filter(isSubscriptionEntry);
     if (rawIndex < 0 || rawIndex >= visibleSubscriptions.length) return null;
     return { subscription: visibleSubscriptions[rawIndex], index: rawIndex };
 }
@@ -812,6 +822,25 @@ function normalizeStoredNodeUrls(value) {
         ? value
         : (typeof value === 'string' ? value.split(/\r?\n/) : []);
     return [...new Set(candidates.map(item => String(item || '').trim()).filter(isRealProxyNode))];
+}
+
+function createInlineSubscription(nodeUrls, name, userId) {
+    const nodes = normalizeStoredNodeUrls(nodeUrls);
+    const id = generateId();
+    const now = new Date().toISOString();
+    return {
+        id,
+        type: 'inline',
+        name: String(name || '').trim() || 'Telegram 多节点订阅',
+        url: `inline:${id}`,
+        nodeUrls: nodes,
+        nodeCount: nodes.length,
+        enabled: true,
+        source: 'telegram',
+        telegram_user_id: userId,
+        lastUpdate: now,
+        created_at: now
+    };
 }
 
 async function readStoredSubscriptionNodeUrls(storageAdapter, subscription) {
@@ -870,6 +899,7 @@ async function renderStoredSubscriptionDetail(chatId, messageId, subscription, i
         expiresAt: Date.now() + TELEGRAM_PREVIEW_TTL_MS,
         savedSubscriptionId: subscription.id || null
     };
+    session.isRemote = isRemoteSubscription(subscription);
     session.subscriptionIndex = index;
     session.listPage = options.listPage ?? Math.floor(index / TELEGRAM_SUBSCRIPTION_LIST_PAGE_SIZE);
     await persistPreviewSession(env, storageAdapter, session);
@@ -883,6 +913,7 @@ async function renderStoredSubscriptionDetail(chatId, messageId, subscription, i
 }
 
 async function refreshStoredSubscriptionDetail(chatId, messageId, subscription, index, userId, env, cache, options = {}) {
+    if (!isRemoteSubscription(subscription)) throw new Error('本地内嵌订阅无需刷新');
     const storageAdapter = await getCachedStorageAdapter(env, cache);
     const preview = await fetchSubscriptionPreview(subscription.url, {
         userAgent: subscription.customUserAgent || subscription.userAgent
@@ -1503,7 +1534,7 @@ async function refreshTelegramSubscriptions(env, requestCache = null) {
     const subscriptions = await getCachedSubscriptions(env, cache);
     const storageAdapter = await getCachedStorageAdapter(env, cache);
     const targets = subscriptions.filter(subscription => (
-        subscription?.enabled !== false && /^https?:\/\//i.test(subscription?.url || '')
+        subscription?.enabled !== false && isRemoteSubscription(subscription)
     ));
 
     let cursor = 0;
@@ -1558,10 +1589,10 @@ async function handleListCommand(chatId, userId, env, page = 0, type = 'all', me
         let userNodes = allNodes;
         let title = '列表';
         if (type === 'node') {
-            userNodes = allNodes.filter(n => !/^https?:\/\//i.test(n.url || ''));
+            userNodes = allNodes.filter(n => !isSubscriptionEntry(n));
             title = '\uD83D\uDE80 节点列表'; // 🚀
         } else if (type === 'sub') {
-            userNodes = allNodes.filter(n => /^https?:\/\//i.test(n.url || ''));
+            userNodes = allNodes.filter(isSubscriptionEntry);
             title = '\uD83D\uDCE1 机场列表'; // 📡
         }
 
@@ -1610,7 +1641,7 @@ async function handleListCommand(chatId, userId, env, page = 0, type = 'all', me
         for (let i = startIdx; i < endIdx; i++) {
             const node = userNodes[i];
             const nodeUrl = node.url || '';
-            const isSub = /^https?:\/\//i.test(nodeUrl);
+            const isSub = isSubscriptionEntry(node);
 
             let protocol = '未知';
             if (isSub) {
@@ -1639,7 +1670,7 @@ async function handleListCommand(chatId, userId, env, page = 0, type = 'all', me
             // 如果是混合列表('all'), 检测URL; 如果明确是 'sub', 则就是sub.
             // 但 handleListCommand 的 type 参数已经区分了 'node', 'sub', 'all'.
             // 这里我们尽量明确:
-            const actionPrefix = (type === 'sub' || (type === 'all' && /^https?:\/\//i.test(userNodes[i].url || '')))
+            const actionPrefix = (type === 'sub' || (type === 'all' && isSubscriptionEntry(userNodes[i])))
                 ? 'node_action_sub_'
                 : 'node_action_node_';
 
@@ -1727,7 +1758,7 @@ async function handleStatsCommand(chatId, userId, env, requestCache = null) {
         const protocolCounts = {};
 
         userNodes.forEach(node => {
-            const isSub = /^https?:\/\//i.test(node.url);
+            const isSub = isSubscriptionEntry(node);
 
             if (isSub) {
                 subCount++;
@@ -2423,50 +2454,7 @@ async function handleImportCommand(chatId, userId, args, env) {
             return;
         }
 
-        const input = args.join(' ').trim();
-        if (extractHttpUrls(input).length > 0) {
-            await sendTelegramMessage(chatId, '⏳ 正在获取订阅内容...', env);
-        }
-
-        let nodeUrls;
-        try {
-            nodeUrls = await resolveTelegramNodeInput(input);
-        } catch (fetchError) {
-            await sendTelegramMessage(chatId, `❌ 获取订阅失败: ${escapeHtml(fetchError.message)}`, env);
-            return;
-        }
-        if (nodeUrls.length === 0) {
-            await sendTelegramMessage(chatId, '❌ 未识别到有效的节点链接', env);
-            return;
-        }
-
-        // 添加节点
-        const storageAdapter = await getStorageAdapter(env);
-        const allSubscriptions = await storageAdapter.getAllSubscriptions();
-
-        const addedNodes = [];
-        for (const url of nodeUrls) {
-            const node = {
-                id: generateId(),
-                name: extractNodeName(url),
-                url: url,
-                enabled: true,
-                source: 'telegram',
-                telegram_user_id: userId,
-                created_at: new Date().toISOString()
-            };
-            allSubscriptions.unshift(node);
-            addedNodes.push(node);
-        }
-
-        await storageAdapter.put(KV_KEY_SUBS, allSubscriptions);
-
-        await sendTelegramMessage(chatId,
-            `✅ <b>导入成功</b>\n\n成功导入 ${addedNodes.length} 个节点\n\n发送 /list 查看列表`,
-            env
-        );
-
-        console.info(`[Telegram Push] User ${userId} imported ${addedNodes.length} nodes`);
+        return handleNodeInput(chatId, args.join(' ').trim(), userId, env);
 
     } catch (error) {
         console.error('[Telegram Push] Import command failed:', error);
@@ -2766,7 +2754,7 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
 
         // HTTP/HTTPS 订阅先展示解析卡片，由按钮决定是否保存。
         const httpUrls = extractHttpUrls(text);
-        if (httpUrls.length > 0) {
+        if (httpUrls.length > 0 && !options.skipSubscriptionPreview && !options.forceInline) {
             for (const url of httpUrls) {
                 try {
                     await showSubscriptionPreview(chatId, url, userId, env, cache);
@@ -2808,33 +2796,44 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
         const addedNodes = [];
         const ignoredUrls = [];
 
-        for (const url of nodeUrls) {
-            // 去重检测
-            const exists = allSubscriptions.some(sub => sub.url === url);
+        if (options.forceInline || nodeUrls.length > 1) {
+            const inlineSubscription = createInlineSubscription(
+                nodeUrls,
+                options.inlineName || 'Telegram 多节点订阅',
+                userId
+            );
+            const signature = inlineSubscription.nodeUrls.join('\n');
+            const exists = allSubscriptions.some(item => (
+                item?.type === 'inline'
+                && normalizeStoredNodeUrls(item.nodeUrls).join('\n') === signature
+            ));
             if (exists) {
-                ignoredUrls.push(url);
-                continue;
+                ignoredUrls.push(...inlineSubscription.nodeUrls);
+            } else {
+                allSubscriptions.unshift(inlineSubscription);
+                addedNodes.push(inlineSubscription);
             }
+        } else {
+            for (const url of nodeUrls) {
+                const exists = allSubscriptions.some(sub => sub.url === url);
+                if (exists) {
+                    ignoredUrls.push(url);
+                    continue;
+                }
 
-            const isSubscription = /^https?:\/\//i.test(url);
-            const defaultName = isSubscription ? `订阅源 ${new URL(url).hostname}` : extractNodeName(url);
+                const node = {
+                    id: generateId(),
+                    name: extractNodeName(url),
+                    url,
+                    enabled: true,
+                    source: 'telegram',
+                    telegram_user_id: userId,
+                    created_at: new Date().toISOString()
+                };
 
-            const node = {
-                id: generateId(),
-                name: defaultName,
-                url: url,
-                enabled: true,
-                source: 'telegram',
-                telegram_user_id: userId,
-                created_at: new Date().toISOString()
-            };
-
-            // 注意：MiSub 中订阅源也通过 KV_KEY_SUBS 存储
-            // 前端通过 URL 格式区分是“手动节点”还是“订阅源”
-            // 订阅源 -> type: subscription or implied by http protocol
-
-            allSubscriptions.unshift(node);
-            addedNodes.push(node);
+                allSubscriptions.unshift(node);
+                addedNodes.push(node);
+            }
         }
 
         if (addedNodes.length === 0) {
@@ -2870,8 +2869,8 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
 
             if (targetProfile) {
                 // 分类 ID
-                const subIds = addedNodes.filter(n => /^https?:\/\//i.test(n.url)).map(n => n.id);
-                const nodeIds = addedNodes.filter(n => !/^https?:\/\//i.test(n.url)).map(n => n.id);
+                const subIds = addedNodes.filter(isSubscriptionEntry).map(n => n.id);
+                const nodeIds = addedNodes.filter(n => !isSubscriptionEntry(n)).map(n => n.id);
 
                 let updated = false;
 
@@ -2909,14 +2908,14 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
 
         if (addedNodes.length === 1) {
             const node = addedNodes[0];
-            const isSub = /^https?:\/\//i.test(node.url);
+            const isSub = isSubscriptionEntry(node);
             const typeLabel = isSub ? '📡 订阅源' : '🚀 节点';
 
             message = `✅ <b>${typeLabel}添加成功！</b>\n\n` +
                 `📋 信息：\n` +
                 `• 名称: ${escapeHtml(node.name)}\n` +
                 // 对于订阅源显示域名，对于节点显示协议
-                `• 类型: ${isSub ? new URL(node.url).hostname : node.url.split('://')[0].toUpperCase()}`;
+                `• 类型: ${isSub ? (isRemoteSubscription(node) ? new URL(node.url).hostname : `内嵌订阅 · ${node.nodeCount} 节点`) : node.url.split('://')[0].toUpperCase()}`;
 
             if (boundProfileName) {
                 message += `\n• 已关联: ${escapeHtml(boundProfileName)}`;
@@ -2926,7 +2925,7 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
         } else {
             message = `✅ <b>成功添加 ${addedNodes.length} 个项目</b>${ignoreMsg}\n\n`;
             addedNodes.slice(0, 5).forEach((node, index) => {
-                const isSub = /^https?:\/\//i.test(node.url);
+                const isSub = isSubscriptionEntry(node);
                 const label = isSub ? '[订阅]' : `[${node.url.split('://')[0].toUpperCase()}]`;
                 message += `${index + 1}. ${escapeHtml(node.name)} ${label}\n`;
             });
@@ -2970,7 +2969,12 @@ async function handleTelegramDocumentInput(chatId, document, userId, env, reques
         );
         const text = await fetchTelegramDocumentText(document, env, cache);
         const input = prepareTelegramDocumentInput(text);
-        return handleNodeInput(chatId, input, userId, env, cache, { rateLimitChecked: true });
+        return handleNodeInput(chatId, input, userId, env, cache, {
+            rateLimitChecked: true,
+            forceInline: true,
+            skipSubscriptionPreview: true,
+            inlineName: getInlineSubscriptionName(filename)
+        });
     } catch (error) {
         console.error('[Telegram Push] Document import failed:', error);
         await sendTelegramMessage(chatId, `❌ 文件解析失败: ${escapeHtml(error.message)}`, env, { requestCache: cache });
@@ -3502,16 +3506,16 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
 
                     if (type === 'sub') {
                         // Must match handleListCommand's filtering logic for 'sub'
-                        targetList = fullList.filter(n => /^https?:\/\//i.test(n.url || ''));
+                        targetList = fullList.filter(isSubscriptionEntry);
                     } else {
                         // Must match handleListCommand's filtering logic for 'node'
-                        targetList = fullList.filter(n => !/^https?:\/\//i.test(n.url || ''));
+                        targetList = fullList.filter(n => !isSubscriptionEntry(n));
                     }
 
                     let actionIdx = idx;
                     if ((idx < 0 || idx >= targetList.length) && fullList[idx]) {
                         const fallbackItem = fullList[idx];
-                        const fallbackIsSub = /^https?:\/\//i.test(fallbackItem.url || '');
+                        const fallbackIsSub = isSubscriptionEntry(fallbackItem);
                         if ((type === 'sub' && fallbackIsSub) || (type === 'node' && !fallbackIsSub)) {
                             actionIdx = targetList.findIndex(item => (
                                 fallbackItem.id
@@ -3631,7 +3635,7 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
 
                     // MUST Use filtered list to match index
                     const allNodes = await getUserNodes(userId, env);
-                    const userNodes = allNodes.filter(n => !/^https?:\/\//i.test(n.url || ''));
+                    const userNodes = allNodes.filter(n => !isSubscriptionEntry(n));
 
                     const profiles = await storageAdapter.getAllProfiles();
                     const settings = await storageAdapter.get(KV_KEY_SETTINGS) || {};
@@ -3663,7 +3667,7 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
 
                     // MUST Use filtered list to match index
                     const allNodes = await getUserNodes(userId, env);
-                    const userNodes = allNodes.filter(n => !/^https?:\/\//i.test(n.url || ''));
+                    const userNodes = allNodes.filter(n => !isSubscriptionEntry(n));
 
                     const profiles = await storageAdapter.getAllProfiles();
                     const settings = await storageAdapter.get(KV_KEY_SETTINGS) || {};
@@ -3691,7 +3695,7 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
 
                     // MUST Use filtered list
                     const allNodes = await getUserNodes(userId, env);
-                    const subs = allNodes.filter(n => /^https?:\/\//i.test(n.url || ''));
+                    const subs = allNodes.filter(isSubscriptionEntry);
 
                     const profiles = await storageAdapter.getAllProfiles();
                     const settings = await storageAdapter.get(KV_KEY_SETTINGS) || {};
@@ -3722,7 +3726,7 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
 
                     // MUST Use filtered list
                     const allNodes = await getUserNodes(userId, env);
-                    const subs = allNodes.filter(n => /^https?:\/\//i.test(n.url || ''));
+                    const subs = allNodes.filter(isSubscriptionEntry);
 
                     const profiles = await storageAdapter.getAllProfiles();
                     const settings = await storageAdapter.get(KV_KEY_SETTINGS) || {};
@@ -3747,12 +3751,16 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                     const idx = parseInt(data.replace('copy_sub_', ''));
                     // MUST Use filtered list
                     const allNodes = await getUserNodes(userId, env);
-                    const subs = allNodes.filter(n => /^https?:\/\//i.test(n.url || ''));
+                    const subs = allNodes.filter(isSubscriptionEntry);
 
                     if (idx >= 0 && idx < subs.length) {
-                        const subUrl = subs[idx].url;
-                        await answerCallbackQuery(callbackQuery.id, '已发送', env);
-                        await sendTelegramMessage(chatId, `📋 <b>订阅链接</b>\n\n<code>${escapeHtml(subUrl)}</code>`, env);
+                        const subscription = subs[idx];
+                        if (!isRemoteSubscription(subscription)) {
+                            await answerCallbackQuery(callbackQuery.id, '本地内嵌订阅没有远程链接', env, true);
+                        } else {
+                            await answerCallbackQuery(callbackQuery.id, '已发送', env);
+                            await sendTelegramMessage(chatId, `📋 <b>订阅链接</b>\n\n<code>${escapeHtml(subscription.url)}</code>`, env);
+                        }
                     } else {
                         await answerCallbackQuery(callbackQuery.id, '对象不存在', env, true);
                     }
@@ -3770,9 +3778,9 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                     let fullList = await getUserNodes(userId, env);
                     let targetList = [];
                     if (isSub) {
-                        targetList = fullList.filter(n => /^https?:\/\//i.test(n.url || ''));
+                        targetList = fullList.filter(isSubscriptionEntry);
                     } else {
-                        targetList = fullList.filter(n => !/^https?:\/\//i.test(n.url || ''));
+                        targetList = fullList.filter(n => !isSubscriptionEntry(n));
                     }
 
                     if (idx >= 0 && idx < targetList.length) {
@@ -3867,10 +3875,10 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                     let targetItem = null;
 
                     if (type === 'sub') {
-                        const subs = allNodes.filter(n => /^https?:\/\//i.test(n.url || ''));
+                        const subs = allNodes.filter(isSubscriptionEntry);
                         if (idx >= 0 && idx < subs.length) targetItem = subs[idx];
                     } else {
-                        const nodes = allNodes.filter(n => !/^https?:\/\//i.test(n.url || ''));
+                        const nodes = allNodes.filter(n => !isSubscriptionEntry(n));
                         if (idx >= 0 && idx < nodes.length) targetItem = nodes[idx];
                     }
 

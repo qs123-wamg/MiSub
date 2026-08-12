@@ -7,6 +7,7 @@ import { fetchNodeCount, batchUpdateNodes } from '../lib/api.js';
 import { handleError } from '../utils/errorHandler.js';
 import { TIMING } from '../constants/timing.js';
 import { t } from '../i18n/index.js';
+import { isRemoteSubscriptionEntry, isSubscriptionEntry } from '../utils/subscription-entry.js';
 
 const isDev = import.meta.env.DEV;
 
@@ -18,7 +19,7 @@ export function useSubscriptions(markDirty) {
 
   // Filtered computed property: Only http/https links are "Subscriptions"
   const subscriptions = computed(() => {
-    return (allSubscriptions.value || []).filter(sub => sub.url && /^https?:\/\//.test(sub.url));
+    return (allSubscriptions.value || []).filter(isSubscriptionEntry);
   });
 
   const subsCurrentPage = ref(1);
@@ -62,7 +63,7 @@ export function useSubscriptions(markDirty) {
     const subToUpdate = subscriptions.value.find(s => s.id === subId);
     if (!subToUpdate) return;
     // Double check URL just in case
-    if (!subToUpdate.url.startsWith('http')) return;
+    if (!isRemoteSubscriptionEntry(subToUpdate)) return;
 
     if (!isInitialLoad) {
       subToUpdate.isUpdating = true;
@@ -225,7 +226,7 @@ export function useSubscriptions(markDirty) {
     }
     markDirty();
 
-    const subsToUpdate = subs.filter(sub => sub.url && sub.url.startsWith('http'));
+    const subsToUpdate = subs.filter(isRemoteSubscriptionEntry);
 
     if (subsToUpdate.length > 0) {
       showToast(t('subscriptions.batchUpdating', { count: subsToUpdate.length }), 'info');
@@ -247,7 +248,7 @@ export function useSubscriptions(markDirty) {
 
   async function batchUpdateAllSubscriptions() {
     const subsToUpdate = subscriptions.value.filter(sub =>
-      sub.enabled && sub.url && sub.url.startsWith('http') && !sub.isUpdating
+      sub.enabled && isRemoteSubscriptionEntry(sub) && !sub.isUpdating
     );
 
     if (subsToUpdate.length === 0) {
@@ -317,7 +318,7 @@ export function useSubscriptions(markDirty) {
   async function autoUpdateAllSubscriptions() {
     try {
       const subsToUpdate = subscriptions.value.filter(sub =>
-        sub.enabled && sub.url && sub.url.startsWith('http') && !sub.isUpdating
+        sub.enabled && isRemoteSubscriptionEntry(sub) && !sub.isUpdating
       );
       for (const sub of subsToUpdate) {
         await handleUpdateNodeCount(sub.id, true);
@@ -381,7 +382,7 @@ export function useSubscriptions(markDirty) {
     // 1. Get all Manual Nodes (to preserve them)
     // We can't rely just on manualNodes computed because it might be filtered or not imported here.
     // Instead, filter from source of truth: allSubscriptions
-    const currentManualNodes = (allSubscriptions.value || []).filter(item => !item.url || !/^https?:\/\//.test(item.url));
+    const currentManualNodes = (allSubscriptions.value || []).filter(item => !isSubscriptionEntry(item));
 
     // 2. Combine New Ordered Subscriptions + Existing Manual Nodes
     // Logic: Manual Nodes at top, Subscriptions at bottom

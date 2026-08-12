@@ -4,6 +4,7 @@ import { parseNodeInfo } from '../utils/geo-utils.js';
 import { calculateProtocolStats, calculateRegionStats } from '../utils/node-parser.js';
 import { KV_KEY_SUBS } from '../config.js';
 import { fetchSubscriptionNodes } from './node-fetcher.js';
+import { isInlineSubscription, isRemoteSubscription } from '../../services/subscription-service.js';
 
 /**
  * 处理单个订阅模式的节点获取
@@ -26,7 +27,32 @@ export async function handleSingleSubscriptionMode(request, env, subscriptionId,
     }
 
     // 检查是否为手工节点
-    if (!subscription.url.startsWith('http')) {
+    if (isInlineSubscription(subscription)) {
+        const nodes = subscription.nodeUrls.map(url => ({
+            ...parseNodeInfo(url),
+            subscriptionName: subscription.name || '内嵌订阅'
+        }));
+        const inlineResult = {
+            subscriptionName: subscription.name || '内嵌订阅',
+            url: subscription.url,
+            success: true,
+            nodes,
+            error: null,
+            isInlineSubscription: true
+        };
+        return {
+            success: true,
+            subscriptions: [inlineResult],
+            nodes,
+            totalCount: nodes.length,
+            stats: {
+                protocols: calculateProtocolStats(nodes),
+                regions: calculateRegionStats(nodes)
+            }
+        };
+    }
+
+    if (!isRemoteSubscription(subscription)) {
         // 手工节点：直接解析节点URL
         const nodeInfo = parseNodeInfo(subscription.url);
         const manualNodeResult = {

@@ -1,4 +1,5 @@
 import { NODE_PROTOCOL_REGEX } from '@/constants/nodeProtocols.js';
+import { isSubscriptionEntry } from '@/utils/subscription-entry.js';
 
 export const countryCodeMap = {
   'hk': ['🇭🇰', '香港', 'HK'],
@@ -58,6 +59,7 @@ export const countryCodeMap = {
 };
 
 export function isManualNodeEntry(item) {
+  if (isSubscriptionEntry(item)) return false;
   if (!item.url) return false;
   if (typeof item.url !== 'string') return false;
 

@@ -10,6 +10,7 @@ import { useToastStore } from '../../../stores/toast.js';
 import { useUIStore } from '../../../stores/ui.js';
 import { TIMING } from '../../../constants/timing.js';
 import { useI18n } from '@/i18n/index.js';
+import { isSubscriptionEntry } from '../../../utils/subscription-entry.js';
 
 // 子组件
 import SubscriptionManager from './SubscriptionManager.vue';
@@ -88,8 +89,8 @@ const initializeState = () => {
   isLoading.value = true;
   if (props.data) {
     const subsData = props.data.misubs || [];
-    initialSubs.value = subsData.filter(item => item.url && /^https?:\/\//.test(item.url));
-    initialNodes.value = subsData.filter(item => !item.url || !/^https?:\/\//.test(item.url));
+    initialSubs.value = subsData.filter(isSubscriptionEntry);
+    initialNodes.value = subsData.filter(item => !isSubscriptionEntry(item));
     initialProfiles.value = props.data.profiles || [];
     config.value = props.data.config || {};
     initializeProfiles();

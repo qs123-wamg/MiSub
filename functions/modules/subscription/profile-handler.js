@@ -7,6 +7,7 @@ import { runOperatorChain } from '../../utils/operator-runner.js';
 import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS, DEFAULT_SETTINGS } from '../config.js';
 import { fetchSubscriptionNodes } from './node-fetcher.js';
 import { applyManualNodeName } from '../utils/node-cleaner.js';
+import { isInlineSubscription, isRemoteSubscription } from '../../services/subscription-service.js';
 
 function ensureArray(data) {
     if (!data) return [];
@@ -113,7 +114,7 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
     if (Array.isArray(profileSubIds)) {
         profileSubIds.forEach(id => {
             const sub = misubMap.get(id);
-            if (sub && sub.enabled && sub.url.startsWith('http')) {
+            if (sub && sub.enabled && (isRemoteSubscription(sub) || isInlineSubscription(sub))) {
                 targetMisubs.push(sub);
             }
         });
@@ -124,15 +125,15 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
     if (Array.isArray(profileNodeIds)) {
         profileNodeIds.forEach(id => {
             const node = misubMap.get(id);
-            if (node && node.enabled && !node.url.startsWith('http')) {
+            if (node && node.enabled && !isRemoteSubscription(node) && !isInlineSubscription(node)) {
                 targetMisubs.push(node);
             }
         });
     }
 
     // 分离HTTP订阅和手工节点
-    const targetSubscriptions = targetMisubs.filter(item => item.url.startsWith('http'));
-    const targetManualNodes = targetMisubs.filter(item => !item.url.startsWith('http'));
+    const targetSubscriptions = targetMisubs.filter(item => isRemoteSubscription(item) || isInlineSubscription(item));
+    const targetManualNodes = targetMisubs.filter(item => !isRemoteSubscription(item) && !isInlineSubscription(item));
 
     // 处理手工节点（直接解析节点URL）
     // 先将用户自定义名称写入 URL（与订阅生成流程保持一致），
@@ -160,7 +161,24 @@ export async function handleProfileMode(request, env, profileId, userAgent, appl
 
     // 并行获取HTTP订阅节点
     const subscriptionResults = await Promise.all(
-        targetSubscriptions.map(sub => fetchSubscriptionNodes(sub.url, sub.name, userAgent, sub.customUserAgent, false, sub.exclude, sub.fetchProxy, skipCertVerify, Boolean(sub?.plusAsSpace), sub?.enableNodeCache === true))
+        targetSubscriptions.map(sub => {
+            if (isInlineSubscription(sub)) {
+                const nodes = sub.nodeUrls.map(url => ({
+                    ...parseNodeInfo(url),
+                    url,
+                    subscriptionName: sub.name || '内嵌订阅'
+                }));
+                return {
+                    subscriptionName: sub.name || '内嵌订阅',
+                    url: sub.url,
+                    success: true,
+                    nodes,
+                    error: null,
+                    isInlineSubscription: true
+                };
+            }
+            return fetchSubscriptionNodes(sub.url, sub.name, userAgent, sub.customUserAgent, false, sub.exclude, sub.fetchProxy, skipCertVerify, Boolean(sub?.plusAsSpace), sub?.enableNodeCache === true);
+        })
     );
 
     // 合并所有结果

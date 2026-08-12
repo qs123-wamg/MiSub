@@ -3,6 +3,8 @@ import { mount } from '@vue/test-utils';
 import { defineComponent, h } from 'vue';
 import ManualNodePanel from '../../src/components/nodes/ManualNodePanel.vue';
 import { createI18n } from '../../src/i18n/index.js';
+import { isManualNodeEntry } from '../../src/composables/manual-nodes/filters.js';
+import { isSubscriptionEntry } from '../../src/utils/subscription-entry.js';
 
 const nodes = [
   { id: 'a1', name: 'A 1', url: 'ss://a1', group: 'A', enabled: true },
@@ -28,6 +30,18 @@ const NodeTableProbe = defineComponent({
 });
 
 describe('manual node sorting filters', () => {
+  it('classifies inline subscriptions as subscriptions instead of manual nodes', () => {
+    const inlineSubscription = {
+      id: 'inline-1',
+      type: 'inline',
+      url: 'inline:inline-1',
+      nodeUrls: ['trojan://pass@example.com:443#One']
+    };
+
+    expect(isManualNodeEntry(inlineSubscription)).toBe(false);
+    expect(isSubscriptionEntry(inlineSubscription)).toBe(true);
+  });
+
   it('uses the active group subset as draggable nodes while sorting', () => {
     const wrapper = mount(ManualNodePanel, {
       props: {

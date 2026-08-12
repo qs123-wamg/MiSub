@@ -11,6 +11,7 @@ import { buildDedupPlan as buildDedupPlanCore } from './manual-nodes/dedup.js';
 import { buildAutoSortedSubscriptions } from './manual-nodes/sorting.js';
 import { collectManualNodeGroups, buildGroupedManualNodes, normalizeManualNodeGroupName } from './manual-nodes/groups.js';
 import { t } from '../i18n/index.js';
+import { isSubscriptionEntry } from '../utils/subscription-entry.js';
 
 export function useManualNodes(markDirty) {
   const { showToast } = useToastStore();
@@ -229,7 +230,7 @@ export function useManualNodes(markDirty) {
       : reorderedVisibleNodes;
 
     // 1. Get all Subscriptions (to preserve them)
-    const currentSubscriptions = (allSubscriptions.value || []).filter(item => item.url && /^https?:\/\//.test(item.url));
+    const currentSubscriptions = (allSubscriptions.value || []).filter(isSubscriptionEntry);
 
     // 2. Combine Existing Subscriptions + New Ordered Manual Nodes
     // Logic: Manual Nodes at top, Subscriptions at bottom

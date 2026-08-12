@@ -8,6 +8,7 @@ import { useManualNodes } from '../../composables/useManualNodes.js';
 import { useDataStore } from '../../stores/useDataStore.js';
 import { useSettingsStore } from '../../stores/settings.js';
 import { useI18n } from '@/i18n/index.js';
+import { isSubscriptionEntry } from '../../utils/subscription-entry.js';
 
 const { t } = useI18n();
 const dataStore = useDataStore();
@@ -109,11 +110,10 @@ const countryCodeMap = {
   'nz': ['🇳🇿', '新西兰', '紐西蘭'],
 };
 
+
 const filteredSubscriptions = computed(() => {
   // Only consider items with valid http/https URLs as "Subscriptions"
-  const validSubs = props.allSubscriptions.filter(sub =>
-    sub.url && /^https?:\/\//.test(sub.url)
-  );
+  const validSubs = props.allSubscriptions.filter(isSubscriptionEntry);
 
   if (!subscriptionSearchTerm.value) {
     return validSubs;

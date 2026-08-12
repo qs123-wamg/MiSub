@@ -1,6 +1,6 @@
 import { StorageFactory } from '../../storage-adapter.js';
 import { migrateConfigSettings, formatBytes, migrateProfileIds, base64EncodeUtf8 } from '../utils.js';
-import { generateCombinedNodeList } from '../../services/subscription-service.js';
+import { generateCombinedNodeList, isInlineSubscription, isRemoteSubscription } from '../../services/subscription-service.js';
 import { sendEnhancedTgNotification, tgEscape } from '../notifications.js';
 import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS, DEFAULT_SETTINGS as defaultSettings, DEFAULT_SUBCONVERTER_BACKEND } from '../config.js';
 import { createDisguiseResponse } from '../disguise-page.js';
@@ -479,7 +479,7 @@ export async function handleMisubRequest(context) {
                         const id = isObject ? item.id : item;
                         
                         const baseSub = misubMap.get(id);
-                        if (baseSub && baseSub.enabled && typeof baseSub.url === 'string' && baseSub.url.startsWith('http')) {
+                        if (baseSub && baseSub.enabled && (isRemoteSubscription(baseSub) || isInlineSubscription(baseSub))) {
                             // 如果是对象，则合并覆盖配置（Profile 级别的设置优先级更高）
                             const sub = isObject ? { ...baseSub, ...item } : baseSub;
                             targetMisubs.push(sub);
@@ -492,7 +492,7 @@ export async function handleMisubRequest(context) {
                 if (Array.isArray(profileNodeIds)) {
                     profileNodeIds.forEach(id => {
                         const node = misubMap.get(id);
-                        if (node && node.enabled && typeof node.url === 'string' && !node.url.startsWith('http')) {
+                        if (node && node.enabled && typeof node.url === 'string' && !isRemoteSubscription(node) && !isInlineSubscription(node)) {
                             targetMisubs.push(node);
                         }
                     });

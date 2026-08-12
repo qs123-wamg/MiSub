@@ -8,6 +8,34 @@ describe('subscription-service 手动节点健壮性', () => {
         vi.unstubAllGlobals();
     });
 
+    it('应展开内嵌机场中的全部节点且不发起网络请求', async () => {
+        const firstNode = 'trojan://pass@one.example.com:443#One';
+        const secondNode = 'trojan://pass@two.example.com:443#Two';
+        vi.stubGlobal('fetch', vi.fn());
+
+        const result = await generateCombinedNodeList(
+            {},
+            { enableAccessLog: false },
+            'ClashMeta',
+            [{
+                id: 'inline-1',
+                type: 'inline',
+                name: '文件机场',
+                url: 'inline:inline-1',
+                nodeUrls: [firstNode, secondNode],
+                nodeCount: 2,
+                enabled: true
+            }],
+            '',
+            { enableSubscriptions: true },
+            false
+        );
+
+        expect(result).toContain('one.example.com');
+        expect(result).toContain('two.example.com');
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
     it('应在包含异常节点时跳过坏节点并继续生成订阅', async () => {
         const misubs = [
             {

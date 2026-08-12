@@ -55,7 +55,8 @@ export function useSubscriptionForms({ addSubscription, updateSubscription }) {
             showToast(t('subscriptions.urlRequired'), 'error');
             return;
         }
-        if (!/^https?:\/\//i.test(editingSubscription.value.url)) {
+        const isInline = editingSubscription.value.type === 'inline' && Array.isArray(editingSubscription.value.nodeUrls);
+        if (!isInline && !/^https?:\/\//i.test(editingSubscription.value.url)) {
             showToast(t('subscriptions.invalidUrl'), 'error');
             return;
         }

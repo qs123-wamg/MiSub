@@ -48,6 +48,18 @@ export function isRealProxyNode(node) {
     return REAL_PROXY_PROTOCOLS.some(protocol => trimmed.startsWith(protocol));
 }
 
+export function isInlineSubscription(sub) {
+    return sub?.type === 'inline' && Array.isArray(sub?.nodeUrls);
+}
+
+export function isRemoteSubscription(sub) {
+    return typeof sub?.url === 'string' && /^https?:\/\//i.test(sub.url.trim());
+}
+
+export function isSubscriptionEntry(sub) {
+    return isRemoteSubscription(sub) || isInlineSubscription(sub);
+}
+
 export function parseSubscriptionUserInfoHeader(header) {
     if (typeof header !== 'string' || !header.trim()) return null;
 
@@ -370,6 +382,7 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
 
     // 重构后的手动节点处理逻辑
     const manualSubSourceGroups = misubs.filter(sub => {
+        if (isInlineSubscription(sub)) return false;
         const url = typeof sub?.url === 'string' ? sub.url.trim() : '';
         return Boolean(url) && !url.toLowerCase().startsWith('http');
     });
@@ -401,7 +414,8 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
     }
     const processedManualNodes = manualProcessedLines.join('\n');
 
-    const httpSubs = misubs.filter(sub => sub && sub.url && sub.url.toLowerCase().startsWith('http'));
+    const httpSubs = misubs.filter(isRemoteSubscription);
+    const inlineSubs = misubs.filter(isInlineSubscription);
     const limiter = createConcurrencyLimiter(FETCH_CONFIG.CONCURRENCY);
     let upstreamSuccessCount = 0; // 追踪真正从远程拉取成功的订阅数（不含 per-sub 缓存回退）
 
@@ -527,12 +541,26 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
         }
     };
 
+    const processInlineSubscription = async (sub) => {
+        let validNodes = sub.nodeUrls
+            .map(node => String(node || '').trim())
+            .filter(isRealProxyNode);
+        validNodes = await applySubscriptionTransforms(validNodes, sub);
+
+        const shouldPrependSubscriptions = profilePrefixSettings?.enableSubscriptions ?? true;
+        const shouldAddSubPrefix = shouldPrependSubscriptions && !skipPrefixDueToRenaming;
+        return (shouldAddSubPrefix && sub.name)
+            ? validNodes.map(node => prependNodeName(node, sub.name)).join('\n')
+            : validNodes.join('\n');
+    };
+
     // 使用并发控制器限制同时请求数量，避免网络拥塞
     const subPromises = httpSubs.map(sub => limiter(() => fetchSingleSubscription(sub)));
     const processedSubContents = await Promise.all(subPromises);
+    const processedInlineContents = await Promise.all(inlineSubs.map(processInlineSubscription));
     
     // --- 阶段 1: 原始数据汇聚 (Raw Data Aggregation) ---
-    const rawCombinedLines = (processedManualNodes + '\n' + processedSubContents.join('\n'))
+    const rawCombinedLines = (processedManualNodes + '\n' + processedSubContents.join('\n') + '\n' + processedInlineContents.join('\n'))
         .split('\n')
         .map(line => line.trim())
         .filter(Boolean);
