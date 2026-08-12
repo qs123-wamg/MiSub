@@ -864,6 +864,7 @@ describe('handleTelegramWebhook', () => {
     const secondNode = 'trojan://password@two.example.com:443?security=tls#Node-Two';
     let responseNodes = [firstNode];
     let total = 1000;
+    let filename = 'Refresh.yaml';
     const { state, adapter } = createState();
     createAdapter.mockReturnValue(adapter);
 
@@ -872,7 +873,7 @@ describe('handleTelegramWebhook', () => {
         return new Response(btoa(`${responseNodes.join('\n')}\n`), {
           status: 200,
           headers: {
-            'Content-Disposition': 'attachment; filename=Refresh.yaml',
+            'Content-Disposition': `attachment; filename=${filename}`,
             'subscription-userinfo': `upload=10; download=20; total=${total}; expire=1798003810`
           }
         });
@@ -906,8 +907,12 @@ describe('handleTelegramWebhook', () => {
       }
     }), { MISUB_KV: null });
 
+    expect(state.subscriptions[0].name).toBe('Refresh');
+
     responseNodes = [firstNode, secondNode];
     total = 2000;
+    state.subscriptions[0].name = 'sub.example.com';
+    filename = 'Updated-Airport.yaml';
     await handleTelegramWebhook(createRequest({
       callback_query: {
         id: 'refresh-saved-preview',
@@ -919,10 +924,23 @@ describe('handleTelegramWebhook', () => {
 
     expect(state.subscriptions).toHaveLength(1);
     expect(state.subscriptions[0]).toMatchObject({
+      name: 'Updated-Airport',
       url: subscriptionUrl,
       nodeCount: 2,
       userInfo: expect.objectContaining({ total: 2000 })
     });
+
+    state.subscriptions[0].name = 'My Custom Airport';
+    filename = 'Latest-Upstream-Name.yaml';
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'refresh-custom-named-preview',
+        data: refreshCallback,
+        from: { id: 1 },
+        message: { message_id: 100, chat: { id: 2104 } }
+      }
+    }), { MISUB_KV: null });
+    expect(state.subscriptions[0].name).toBe('My Custom Airport');
   });
   it('keeps the original command surface in help output', async () => {
     const { adapter } = createState();
@@ -1048,7 +1066,7 @@ describe('handleTelegramWebhook', () => {
     const { state, adapter } = createState({
       subscriptions: [{
         id: 'airport-refresh',
-        name: 'Refresh Airport',
+        name: 'airport.example',
         url: subscriptionUrl,
         enabled: true,
         nodeCount: 0,
@@ -1081,6 +1099,7 @@ describe('handleTelegramWebhook', () => {
     }), { MISUB_KV: null });
 
     expect(state.subscriptions[0]).toMatchObject({
+      name: 'Refresh-Airport',
       nodeCount: 1,
       userInfo: expect.objectContaining({ total: 107374182400 }),
       lastError: null,
@@ -1405,7 +1424,10 @@ describe('handleTelegramWebhook', () => {
 
     global.fetch = vi.fn(async url => {
       if (String(url) === subscriptionUrl) {
-        return new Response(btoa(`${nodes.join('\n')}\n`), { status: 200 });
+        return new Response(btoa(`${nodes.join('\n')}\n`), {
+          status: 200,
+          headers: { 'Content-Disposition': 'attachment; filename=Parsed-Action-Airport.yaml' }
+        });
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });

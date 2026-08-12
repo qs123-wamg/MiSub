@@ -250,6 +250,28 @@ function getSubscriptionDisplayName(filename, sourceUrl) {
     try { return new URL(sourceUrl).hostname; } catch { return '未命名订阅'; }
 }
 
+function getSubscriptionUrlHostname(url) {
+    try { return new URL(url).hostname.trim(); } catch { return ''; }
+}
+
+function shouldUpdateStoredSubscriptionName(subscription) {
+    const name = String(subscription?.name || '').trim();
+    if (!name || ['未命名订阅', 'subscription'].includes(name.toLowerCase())) return true;
+
+    const hostname = getSubscriptionUrlHostname(subscription?.url);
+    if (!hostname) return false;
+    return name.toLowerCase() === hostname.toLowerCase()
+        || name.toLowerCase() === `订阅源 ${hostname}`.toLowerCase();
+}
+
+function updateStoredSubscriptionName(subscription, parsedName) {
+    const name = String(parsedName || '').trim();
+    if (!name || !shouldUpdateStoredSubscriptionName(subscription)) return false;
+    if (String(subscription.name || '').trim() === name) return false;
+    subscription.name = name;
+    return true;
+}
+
 function decodeTextBytes(bytes) {
     const content = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     if (content.length >= 2 && content[0] === 0xff && content[1] === 0xfe) {
@@ -869,6 +891,7 @@ async function refreshStoredSubscriptionDetail(chatId, messageId, subscription, 
     if (nodes.length === 0) throw new Error('未识别到有效节点');
 
     if (!subscription.id) subscription.id = generateId();
+    updateStoredSubscriptionName(subscription, preview.name);
     subscription.nodeCount = nodes.length;
     subscription.userInfo = preview.userInfo || null;
     subscription.lastUpdate = new Date().toISOString();
@@ -990,6 +1013,7 @@ async function savePreviewSubscription(session, userId, env, cache) {
         subscriptions.unshift(subscription);
     } else {
         if (!subscription.id) subscription.id = generateId();
+        updateStoredSubscriptionName(subscription, session.name);
         subscription.nodeCount = session.nodeUrls.length;
         subscription.userInfo = session.userInfo || null;
         subscription.lastUpdate = now;
@@ -1495,6 +1519,7 @@ async function refreshTelegramSubscriptions(env, requestCache = null) {
                 const nodes = parseNodeList(preview.nodeUrls.join('\n'));
                 if (nodes.length === 0) throw new Error('未识别到有效节点');
                 if (!subscription.id) subscription.id = generateId();
+                updateStoredSubscriptionName(subscription, preview.name);
                 subscription.nodeCount = nodes.length;
                 subscription.userInfo = preview.userInfo || null;
                 subscription.lastUpdate = new Date().toISOString();
