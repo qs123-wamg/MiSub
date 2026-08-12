@@ -29,7 +29,7 @@ import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS } from '../config.js';
 import { assertPublicNetworkUrl } from '../security-utils.js';
 import { extractValidNodes, parseNodeList } from '../utils/node-parser.js';
 import { getRegionEmoji } from '../utils/geo-utils.js';
-import { parseSubscriptionUserInfoHeader } from '../../services/subscription-service.js';
+import { buildSubscriptionNodeCacheKey, isRealProxyNode, parseSubscriptionUserInfoHeader } from '../../services/subscription-service.js';
 import { generateClashConfig } from '../../utils/url-to-clash.js';
 const TELEGRAM_SUBSCRIPTION_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const TELEGRAM_PREVIEW_SESSION_PREFIX = 'tg_subscription_preview:';
@@ -686,6 +686,7 @@ function buildSubscriptionPreviewKeyboard(session) {
 
 function buildStoredSubscriptionDetailCard(session) {
     const nodes = getPreviewNodes(session);
+    const nodeCount = Math.max(nodes.length, Number(session.storedNodeCount || 0));
     const info = session.userInfo || {};
     const upload = normalizeTrafficBytes(info.upload);
     const download = normalizeTrafficBytes(info.download);
@@ -712,16 +713,23 @@ function buildStoredSubscriptionDetailCard(session) {
         `${index + 1}. [${escapeHtml(String(node.protocol || '未知').toUpperCase())}] ${escapeHtml(truncateTelegramText(node.name || '未命名节点', 100))}`
     ));
 
+    if (nodeLines.length === 0) {
+        const emptyText = nodeCount > 0
+            ? '暂无已缓存节点明细，请点击“刷新订阅”更新'
+            : '暂无已存储节点，请点击“刷新订阅”更新';
+        return `${message}<blockquote expandable>🔌 <b>节点列表（共${nodeCount}个）</b>\n${emptyText}</blockquote>`;
+    }
+
     while (nodeLines.length > 0) {
-        const limited = nodeLines.length < nodes.length ? `，仅显示前${nodeLines.length}个` : '';
-        const nodeBlock = `<blockquote expandable>🔌 <b>节点列表（共${nodes.length}个${limited}）</b>\n${nodeLines.join('\n')}</blockquote>`;
+        const limited = nodeLines.length < nodeCount ? `，仅显示前${nodeLines.length}个` : '';
+        const nodeBlock = `<blockquote expandable>🔌 <b>节点列表（共${nodeCount}个${limited}）</b>\n${nodeLines.join('\n')}</blockquote>`;
         if (`${message}${nodeBlock}`.length <= TELEGRAM_PREVIEW_MESSAGE_LIMIT) {
             return `${message}${nodeBlock}`;
         }
         nodeLines.pop();
     }
 
-    return `${message}<blockquote expandable>🔌 <b>节点列表（共${nodes.length}个）</b>\n节点名称过长，请使用“导出节点”查看</blockquote>`;
+    return `${message}<blockquote expandable>🔌 <b>节点列表（共${nodeCount}个）</b>\n节点名称过长，请使用“导出节点”查看</blockquote>`;
 }
 
 function buildStoredSubscriptionDetailKeyboard(session) {
@@ -777,27 +785,69 @@ async function resolveTelegramSubscriptionListSelection(userId, rawIndex, env, c
     return { subscription: visibleSubscriptions[rawIndex], index: rawIndex };
 }
 
-async function showStoredSubscriptionDetail(chatId, messageId, subscription, index, userId, env, cache, options = {}) {
+function normalizeStoredNodeUrls(value) {
+    const candidates = Array.isArray(value)
+        ? value
+        : (typeof value === 'string' ? value.split(/\r?\n/) : []);
+    return [...new Set(candidates.map(item => String(item || '').trim()).filter(isRealProxyNode))];
+}
+
+async function readStoredSubscriptionNodeUrls(storageAdapter, subscription) {
+    const directNodes = normalizeStoredNodeUrls(subscription?.nodeUrls || subscription?.nodes);
+    if (directNodes.length > 0) return directNodes;
+
+    try {
+        const cached = await storageAdapter.get(buildSubscriptionNodeCacheKey(subscription));
+        return normalizeStoredNodeUrls(cached?.nodes);
+    } catch (error) {
+        console.warn('[Telegram Push] Failed to read stored subscription nodes:', error?.message || error);
+        return [];
+    }
+}
+
+async function persistStoredSubscriptionNodeUrls(storageAdapter, subscription, nodeUrls) {
+    const nodes = normalizeStoredNodeUrls(nodeUrls);
+    if (nodes.length === 0) return null;
+
+    const cacheKey = buildSubscriptionNodeCacheKey(subscription);
+    try {
+        await storageAdapter.put(cacheKey, {
+            nodes,
+            nodeCount: nodes.length,
+            updatedAt: new Date().toISOString(),
+            sourceId: subscription?.id || null,
+            sourceName: subscription?.name || '',
+            sourceUrl: subscription?.url || ''
+        });
+        return cacheKey;
+    } catch (error) {
+        console.warn('[Telegram Push] Failed to persist stored subscription nodes:', error?.message || error);
+        return null;
+    }
+}
+
+async function renderStoredSubscriptionDetail(chatId, messageId, subscription, index, userId, env, cache, options = {}) {
     const storageAdapter = await getCachedStorageAdapter(env, cache);
-    const preview = await fetchSubscriptionPreview(subscription.url, {
-        userAgent: subscription.customUserAgent || subscription.userAgent
-    });
-    if (preview.nodeUrls.length === 0) throw new Error('未识别到有效节点');
-
-    const session = createPreviewSession({
-        ...preview,
-        name: subscription.name || preview.name
-    }, userId, options.sessionId);
-    if (session.nodeUrls.length === 0) throw new Error('未识别到有效节点');
-
-    if (!subscription.id) subscription.id = generateId();
-    subscription.nodeCount = session.nodeUrls.length;
-    subscription.userInfo = preview.userInfo || null;
-    subscription.lastUpdate = new Date().toISOString();
-    subscription.lastError = null;
-    await persistCachedSubscriptions(env, cache);
-
-    session.savedSubscriptionId = subscription.id;
+    const nodeUrls = options.nodeUrls || await readStoredSubscriptionNodeUrls(storageAdapter, subscription);
+    if (!subscription.id) {
+        subscription.id = generateId();
+        await persistCachedSubscriptions(env, cache);
+        await persistStoredSubscriptionNodeUrls(storageAdapter, subscription, nodeUrls);
+    }
+    const session = {
+        id: options.sessionId || generateId(),
+        userId,
+        sourceUrl: subscription.url,
+        finalUrl: subscription.url,
+        filename: subscription.name || 'subscription',
+        name: subscription.name || '未命名订阅',
+        nodeUrls,
+        storedNodeCount: Math.max(nodeUrls.length, Number(subscription.nodeCount || 0)),
+        userInfo: subscription.userInfo || null,
+        fetchedAt: Date.parse(subscription.lastUpdate || '') || Date.now(),
+        expiresAt: Date.now() + TELEGRAM_PREVIEW_TTL_MS,
+        savedSubscriptionId: subscription.id || null
+    };
     session.subscriptionIndex = index;
     session.listPage = options.listPage ?? Math.floor(index / TELEGRAM_SUBSCRIPTION_LIST_PAGE_SIZE);
     await persistPreviewSession(env, storageAdapter, session);
@@ -810,10 +860,39 @@ async function showStoredSubscriptionDetail(chatId, messageId, subscription, ind
     return session;
 }
 
+async function refreshStoredSubscriptionDetail(chatId, messageId, subscription, index, userId, env, cache, options = {}) {
+    const storageAdapter = await getCachedStorageAdapter(env, cache);
+    const preview = await fetchSubscriptionPreview(subscription.url, {
+        userAgent: subscription.customUserAgent || subscription.userAgent
+    });
+    const nodes = parseNodeList(preview.nodeUrls.join('\n')).map(node => node.url);
+    if (nodes.length === 0) throw new Error('未识别到有效节点');
+
+    if (!subscription.id) subscription.id = generateId();
+    subscription.nodeCount = nodes.length;
+    subscription.userInfo = preview.userInfo || null;
+    subscription.lastUpdate = new Date().toISOString();
+    subscription.lastError = null;
+    await persistCachedSubscriptions(env, cache);
+    const cacheKey = await persistStoredSubscriptionNodeUrls(storageAdapter, subscription, nodes);
+
+    const session = await renderStoredSubscriptionDetail(
+        chatId,
+        messageId,
+        subscription,
+        index,
+        userId,
+        env,
+        cache,
+        { ...options, nodeUrls: nodes }
+    );
+    return { session, cacheKey };
+}
+
 async function openStoredSubscriptionDetail(callbackQueryId, chatId, messageId, selected, userId, env, cache) {
-    await answerCallbackQuery(callbackQueryId, '正在解析订阅...', env);
+    await answerCallbackQuery(callbackQueryId, '', env);
     try {
-        await showStoredSubscriptionDetail(
+        await renderStoredSubscriptionDetail(
             chatId,
             messageId,
             selected.subscription,
@@ -1398,6 +1477,7 @@ async function renderTelegramSubscriptionList(chatId, subscriptions, env, page =
 async function refreshTelegramSubscriptions(env, requestCache = null) {
     const cache = requestCache || createRequestCache();
     const subscriptions = await getCachedSubscriptions(env, cache);
+    const storageAdapter = await getCachedStorageAdapter(env, cache);
     const targets = subscriptions.filter(subscription => (
         subscription?.enabled !== false && /^https?:\/\//i.test(subscription?.url || '')
     ));
@@ -1414,10 +1494,16 @@ async function refreshTelegramSubscriptions(env, requestCache = null) {
                 });
                 const nodes = parseNodeList(preview.nodeUrls.join('\n'));
                 if (nodes.length === 0) throw new Error('未识别到有效节点');
+                if (!subscription.id) subscription.id = generateId();
                 subscription.nodeCount = nodes.length;
                 subscription.userInfo = preview.userInfo || null;
                 subscription.lastUpdate = new Date().toISOString();
                 subscription.lastError = null;
+                await persistStoredSubscriptionNodeUrls(
+                    storageAdapter,
+                    subscription,
+                    nodes.map(node => node.url)
+                );
                 success++;
             } catch (error) {
                 subscription.lastError = error.message || '更新失败';
@@ -3021,7 +3107,7 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                     await sendTelegramMessage(chatId, '❌ 订阅不存在或已删除', env, { requestCache: cache });
                 } else {
                     try {
-                        await showStoredSubscriptionDetail(
+                        const refreshed = await refreshStoredSubscriptionDetail(
                             chatId,
                             messageId,
                             subscription,
@@ -3031,7 +3117,9 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                             cache,
                             { sessionId: session.id, listPage: session.listPage }
                         );
-                        await clearAllNodeCaches(storageAdapter).catch(() => {});
+                        await clearAllNodeCaches(storageAdapter, {
+                            preserveKeys: refreshed.cacheKey ? [refreshed.cacheKey] : []
+                        }).catch(() => {});
                     } catch (error) {
                         subscription.lastError = error.message || '更新失败';
                         await persistCachedSubscriptions(env, cache);
@@ -3071,6 +3159,10 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                     await handleListCommand(chatId, userId, env, session.listPage || 0, 'sub', messageId, cache);
                 }
             } else if (action === 'export') {
+                if (!Array.isArray(session.nodeUrls) || session.nodeUrls.length === 0) {
+                    await answerCallbackQuery(callbackQuery.id, '暂无已缓存节点，请先刷新订阅', env, true);
+                    return createJsonResponse({ ok: true });
+                }
                 await answerCallbackQuery(callbackQuery.id, '正在导出节点...', env);
                 await sendTelegramDocument(
                     chatId,

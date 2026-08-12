@@ -51,9 +51,13 @@ function createState(overrides = {}) {
   return {
     state,
     adapter: {
-      get: vi.fn(async key => key.startsWith('tg_subscription_preview:') ? state.misc[key] || null : state.settings),
+      get: vi.fn(async key => (
+        key.startsWith('tg_subscription_preview:') || key.startsWith('node_cache_subscription_')
+          ? state.misc[key] || null
+          : state.settings
+      )),
       put: vi.fn(async (key, value) => {
-        if (key.startsWith('tg_subscription_preview:')) state.misc[key] = value;
+        if (key.startsWith('tg_subscription_preview:') || key.startsWith('node_cache_subscription_')) state.misc[key] = value;
         else state.settings = value;
         return true;
       }),
@@ -1082,6 +1086,12 @@ describe('handleTelegramWebhook', () => {
       lastError: null,
       lastUpdate: expect.any(String)
     });
+    expect(state.misc['node_cache_subscription_airport-refresh']).toMatchObject({
+      nodes: [refreshedNode],
+      nodeCount: 1,
+      sourceId: 'airport-refresh',
+      sourceUrl: subscriptionUrl
+    });
     const calls = global.fetch.mock.calls;
     expect(calls.some(([url]) => String(url) === subscriptionUrl)).toBe(true);
     const editBody = calls
@@ -1094,6 +1104,23 @@ describe('handleTelegramWebhook', () => {
       .filter(([url]) => String(url).includes('/sendMessage'))
       .map(([, options]) => JSON.parse(options.body));
     expect(sentBodies.at(-1).text).toContain('更新完成：成功 1 个，失败 0 个');
+
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'open-refreshed-subscription',
+        data: 'sub_detail_0',
+        from: { id: 1 },
+        message: { message_id: 89, chat: { id: 4004 } }
+      }
+    }), { MISUB_KV: null });
+
+    expect(global.fetch.mock.calls.filter(([url]) => String(url) === subscriptionUrl)).toHaveLength(1);
+    const detailBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(detailBody.text).toContain('节点列表（共1个）');
+    expect(detailBody.text).toContain('1. [TROJAN] Refreshed-Node');
   });
   it('clears stale traffic metadata when a successful refresh omits the user-info header', async () => {
     const subscriptionUrl = 'https://airport.example/without-user-info';
@@ -1181,22 +1208,29 @@ describe('handleTelegramWebhook', () => {
         name: '悠悠',
         url: subscriptionUrl,
         enabled: true,
-        customUserAgent: 'ClashMeta/1.0'
-      }]
+        customUserAgent: 'ClashMeta/1.0',
+        nodeCount: 2,
+        userInfo: {
+          upload: 20 * 1024 ** 3,
+          download: 138 * 1024 ** 3,
+          total: 200 * 1024 ** 3,
+          expire: now + 116 * 86400
+        },
+        lastError: null,
+        lastUpdate: '2026-08-12T06:00:00.000Z'
+      }],
+      misc: {
+        'node_cache_subscription_airport-detail': {
+          nodes: [firstNode, secondNode],
+          nodeCount: 2,
+          updatedAt: '2026-08-12T06:00:00.000Z'
+        }
+      }
     });
     createAdapter.mockReturnValue(adapter);
 
-    global.fetch = vi.fn(async (url, options) => {
-      if (String(url) === subscriptionUrl) {
-        expect(options.headers['User-Agent']).toBe('ClashMeta/1.0');
-        return new Response(encodeBase64Utf8(`${firstNode}\n${secondNode}\n`), {
-          status: 200,
-          headers: {
-            'Content-Disposition': 'attachment; filename=Remote-Name.yaml',
-            'subscription-userinfo': `upload=${20 * 1024 ** 3}; download=${138 * 1024 ** 3}; total=${200 * 1024 ** 3}; expire=${now + 116 * 86400}`
-          }
-        });
-      }
+    global.fetch = vi.fn(async url => {
+      if (String(url) === subscriptionUrl) throw new Error('stored detail must not fetch the subscription');
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
 
@@ -1215,8 +1249,9 @@ describe('handleTelegramWebhook', () => {
       nodeCount: 2,
       userInfo: expect.objectContaining({ total: 200 * 1024 ** 3 }),
       lastError: null,
-      lastUpdate: expect.any(String)
+      lastUpdate: '2026-08-12T06:00:00.000Z'
     });
+    expect(global.fetch.mock.calls.some(([url]) => String(url) === subscriptionUrl)).toBe(false);
     const editBody = global.fetch.mock.calls
       .filter(([url]) => String(url).includes('/editMessageText'))
       .map(([, options]) => JSON.parse(options.body))
@@ -1241,6 +1276,116 @@ describe('handleTelegramWebhook', () => {
       '⬅️ 返回列表', '🏠 主菜单'
     ]);
     expect(buttons.flat().every(button => button.callback_data)).toBe(true);
+  });
+
+  it('shows stored metadata without fetching when no node-detail cache exists', async () => {
+    const subscriptionUrl = 'https://airport.example/stored-metadata-only';
+    const { state, adapter } = createState({
+      subscriptions: [{
+        name: 'Stored Metadata Airport',
+        url: subscriptionUrl,
+        enabled: true,
+        nodeCount: 56,
+        userInfo: {
+          upload: 20 * 1024 ** 3,
+          download: 80 * 1024 ** 3,
+          total: 200 * 1024 ** 3,
+          expire: Math.floor(Date.now() / 1000) + 90 * 86400
+        },
+        lastUpdate: '2026-08-12T06:00:00.000Z'
+      }]
+    });
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url) === subscriptionUrl) throw new Error('stored detail must not fetch the subscription');
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    const invoke = data => handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: `stored-metadata-${data}`,
+        data,
+        from: { id: 1 },
+        message: { message_id: 95, chat: { id: 4008 } }
+      }
+    }), { MISUB_KV: null });
+
+    await invoke('sub_detail_0');
+    expect(global.fetch.mock.calls.some(([url]) => String(url) === subscriptionUrl)).toBe(false);
+    expect(state.subscriptions[0].id).toEqual(expect.any(String));
+    const storedSession = Object.entries(state.misc)
+      .find(([key]) => key.startsWith('tg_subscription_preview:'))?.[1];
+    expect(storedSession?.savedSubscriptionId).toBe(state.subscriptions[0].id);
+    const detailBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(detailBody.text).toContain('<b>流量详情:</b> 100.00 GB / 200.00 GB');
+    expect(detailBody.text).toContain('节点列表（共56个）');
+    expect(detailBody.text).toContain('暂无已缓存节点明细，请点击“刷新订阅”更新');
+
+    const exportCallback = detailBody.reply_markup.inline_keyboard.flat()
+      .find(button => button.text === '📦 导出节点').callback_data;
+    await invoke(exportCallback);
+    expect(global.fetch.mock.calls.some(([url]) => String(url).includes('/sendDocument'))).toBe(false);
+    const callbackBodies = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/answerCallbackQuery'))
+      .map(([, options]) => JSON.parse(options.body));
+    expect(callbackBodies.at(-1)).toMatchObject({
+      text: '暂无已缓存节点，请先刷新订阅',
+      show_alert: true
+    });
+  });
+
+  it('migrates legacy URL-keyed node details when assigning a stored subscription id', async () => {
+    const subscriptionUrl = 'https://airport.example/legacy-url-cache';
+    const cachedNode = 'trojan://password@legacy.example.com:443#Legacy-Node';
+    const legacyCacheKey = 'node_cache_subscription_url_5m2uvd';
+    const { state, adapter } = createState({
+      subscriptions: [{
+        name: 'Legacy Cache Airport',
+        url: subscriptionUrl,
+        enabled: true,
+        nodeCount: 1
+      }],
+      misc: {
+        [legacyCacheKey]: {
+          nodes: [cachedNode],
+          nodeCount: 1
+        }
+      }
+    });
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url) === subscriptionUrl) throw new Error('legacy cached detail must not fetch the subscription');
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    const invoke = id => handleTelegramWebhook(createRequest({
+      callback_query: {
+        id,
+        data: 'sub_detail_0',
+        from: { id: 1 },
+        message: { message_id: 96, chat: { id: 4009 } }
+      }
+    }), { MISUB_KV: null });
+
+    await invoke('legacy-detail-first');
+    const assignedId = state.subscriptions[0].id;
+    expect(assignedId).toEqual(expect.any(String));
+    expect(state.misc[`node_cache_subscription_${encodeURIComponent(assignedId)}`]?.nodes).toEqual([cachedNode]);
+
+    await invoke('legacy-detail-second');
+    expect(global.fetch.mock.calls.some(([url]) => String(url) === subscriptionUrl)).toBe(false);
+    const detailBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(detailBody.text).toContain('1. [TROJAN] Legacy-Node');
   });
 
   it('supports stored-subscription refresh, export, short link, delete cancel, and list return', async () => {
