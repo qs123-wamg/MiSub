@@ -41,6 +41,13 @@ const TELEGRAM_SUBSCRIPTION_TIMEOUT_MS = 18000;
 const TELEGRAM_SUBSCRIPTION_LIST_PAGE_SIZE = 10;
 const TELEGRAM_SUBSCRIPTION_EXPIRING_DAYS = 30;
 const TELEGRAM_IMPORT_FILE_EXTENSIONS = new Set(['.txt', '.yaml', '.yml', '.conf', '.json']);
+const TELEGRAM_EXTENSIONLESS_FILE_MIME_TYPES = new Set([
+    'text/plain',
+    'text/html',
+    'application/octet-stream',
+    'application/yaml',
+    'application/x-yaml'
+]);
 
 // ==================== 存储与配置 ====================
 
@@ -327,8 +334,10 @@ async function readSubscriptionResponseText(response, contentLabel = '订阅内�
 function validateTelegramImportDocument(document) {
     const filename = String(document?.file_name || '').trim();
     const extension = filename.includes('.') ? filename.slice(filename.lastIndexOf('.')).toLowerCase() : '';
-    if (!TELEGRAM_IMPORT_FILE_EXTENSIONS.has(extension)) {
-        throw new Error('仅支持 TXT、YAML、YML、CONF 或 JSON 文件');
+    const mimeType = String(document?.mime_type || '').split(';')[0].trim().toLowerCase();
+    const isSupportedExtensionlessFile = !extension && TELEGRAM_EXTENSIONLESS_FILE_MIME_TYPES.has(mimeType);
+    if (!TELEGRAM_IMPORT_FILE_EXTENSIONS.has(extension) && !isSupportedExtensionlessFile) {
+        throw new Error('仅支持 TXT、YAML、YML、CONF、JSON 或无扩展名的订阅文件');
     }
 
     const fileSize = Number(document?.file_size || 0);

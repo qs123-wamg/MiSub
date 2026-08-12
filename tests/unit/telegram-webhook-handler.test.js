@@ -846,6 +846,53 @@ describe('handleTelegramWebhook', () => {
       .map(([, options]) => JSON.parse(options.body));
     expect(sentBodies.at(-1).text).toContain('未识别到有效的链接');
   });
+  it('imports extensionless subscription files returned by some providers', async () => {
+    const firstNode = 'trojan://password@one.example.com:443?security=tls#One';
+    const secondNode = 'vless://00000000-0000-4000-8000-000000000020@two.example.com:443?security=tls#Two';
+    const fileContent = btoa(`${firstNode}\n${secondNode}\n`);
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/getFile')) {
+        return new Response(JSON.stringify({ ok: true, result: { file_path: 'documents/extensionless-subscription' } }), { status: 200 });
+      }
+      if (value.includes('/file/botbot-token/documents/extensionless-subscription')) {
+        return new Response(fileContent, { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        document: {
+          file_id: 'telegram-extensionless-file-id',
+          file_name: '一元机场',
+          file_size: fileContent.length,
+          mime_type: 'application/octet-stream'
+        },
+        chat: { id: 2112 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(1);
+    expect(state.subscriptions[0]).toMatchObject({
+      type: 'inline',
+      name: '一元机场',
+      nodeUrls: [firstNode, secondNode],
+      nodeCount: 2
+    });
+    const card = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .find(body => body.text?.includes('机场名称:'));
+    expect(card.text).toContain('一元机场');
+    expect(card.text).toContain('节点总数:</b> 2');
+    expect(card.reply_markup.inline_keyboard.flat()).toHaveLength(6);
+  });
   it('rejects unsupported Telegram document types before downloading', async () => {
     const { state, adapter } = createState();
     createAdapter.mockReturnValue(adapter);
@@ -868,7 +915,7 @@ describe('handleTelegramWebhook', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(String(global.fetch.mock.calls[0][0])).toContain('/sendMessage');
     const body = JSON.parse(global.fetch.mock.calls[0][1].body);
-    expect(body.text).toContain('仅支持 TXT、YAML、YML、CONF 或 JSON 文件');
+    expect(body.text).toContain('仅支持 TXT、YAML、YML、CONF、JSON 或无扩展名的订阅文件');
   });
   it('rejects oversized Telegram documents before requesting file info', async () => {
     const { state, adapter } = createState();
