@@ -35,6 +35,7 @@ const TELEGRAM_SUBSCRIPTION_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x
 const TELEGRAM_PREVIEW_SESSION_PREFIX = 'tg_subscription_preview:';
 const TELEGRAM_PREVIEW_TTL_MS = 60 * 60 * 1000;
 const TELEGRAM_PREVIEW_NODE_LIMIT = 20;
+const TELEGRAM_SUBSCRIPTION_DETAIL_NODE_LIMIT = 50;
 const TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT = 240;
 const TELEGRAM_PREVIEW_MESSAGE_LIMIT = 3900;
 const TELEGRAM_SUBSCRIPTION_TIMEOUT_MS = 18000;
@@ -316,8 +317,8 @@ function prepareTelegramDocumentInput(text) {
     const content = String(text || '');
     const parsedNodes = extractValidNodes(content);
     const embeddedNodeUrls = extractNodeUrls(content);
-    const isStructuredConfig = /(?:^|[\s{,])["']?(?:proxies|proxy|outbounds)["']?\s*:/i.test(content)
-        || /^\s*\[(?:Proxy|Proxy Group)\]\s*$/im.test(content)
+    const isStructuredConfig = /(?:^|[\s{,])["']?(?:proxies|proxy|outbounds|proxy-groups|proxy-providers|rule-providers|rules|route|dns|inbounds|log|experimental)["']?\s*:/i.test(content)
+        || /^\s*\[(?:Proxy|Proxy Group|General|Server Local|Server Remote|Filter Remote|Rewrite Remote|DNS)\]\s*$/im.test(content)
         || parsedNodes.some(nodeUrl => !embeddedNodeUrls.includes(nodeUrl));
 
     return isStructuredConfig ? parsedNodes.join('\n') : content;
@@ -683,6 +684,190 @@ function buildSubscriptionPreviewKeyboard(session) {
     };
 }
 
+function buildStoredSubscriptionDetailCard(session) {
+    const nodes = getPreviewNodes(session);
+    const info = session.userInfo || {};
+    const upload = normalizeTrafficBytes(info.upload);
+    const download = normalizeTrafficBytes(info.download);
+    const total = normalizeTrafficBytes(info.total);
+    const used = upload + download;
+    const remaining = Math.max(0, total - used);
+    const usagePercent = total > 0 ? Math.min(100, (used / total) * 100) : 0;
+    const sourceUrl = truncateTelegramText(session.sourceUrl, 360);
+    const name = truncateTelegramText(session.name || '未命名订阅', 120);
+
+    let message = `<b>编号:</b> #${Number(session.subscriptionIndex || 0) + 1}\n`;
+    message += `<b>配置名称:</b> ${escapeHtml(name)}\n`;
+    message += `<b>订阅链接:</b>\n<code>${escapeHtml(sourceUrl)}</code>\n`;
+
+    if (total > 0) {
+        message += `<blockquote><b>流量详情:</b> ${formatSubscriptionListTraffic(used)} / ${formatSubscriptionListTraffic(total)}\n`;
+        message += `<b>使用进度:</b> ${buildUsageProgress(usagePercent)} ${usagePercent.toFixed(1)}%\n`;
+        message += `<b>剩余可用:</b> ${formatSubscriptionListTraffic(remaining)}\n`;
+        message += `<b>过期时间:</b> ${formatExpiryDate(info.expire)}\n`;
+        message += `<b>剩余时间:</b> ${formatRemainingTime(info.expire)}</blockquote>\n`;
+    }
+
+    let nodeLines = nodes.slice(0, TELEGRAM_SUBSCRIPTION_DETAIL_NODE_LIMIT).map((node, index) => (
+        `${index + 1}. [${escapeHtml(String(node.protocol || '未知').toUpperCase())}] ${escapeHtml(truncateTelegramText(node.name || '未命名节点', 100))}`
+    ));
+
+    while (nodeLines.length > 0) {
+        const limited = nodeLines.length < nodes.length ? `，仅显示前${nodeLines.length}个` : '';
+        const nodeBlock = `<blockquote expandable>🔌 <b>节点列表（共${nodes.length}个${limited}）</b>\n${nodeLines.join('\n')}</blockquote>`;
+        if (`${message}${nodeBlock}`.length <= TELEGRAM_PREVIEW_MESSAGE_LIMIT) {
+            return `${message}${nodeBlock}`;
+        }
+        nodeLines.pop();
+    }
+
+    return `${message}<blockquote expandable>🔌 <b>节点列表（共${nodes.length}个）</b>\n节点名称过长，请使用“导出节点”查看</blockquote>`;
+}
+
+function buildStoredSubscriptionDetailKeyboard(session) {
+    return {
+        inline_keyboard: [
+            [
+                { text: '🔄 刷新订阅', callback_data: `sd_refresh_${session.id}` },
+                { text: '🗑️ 删除订阅', callback_data: `sd_delete_${session.id}` }
+            ],
+            [
+                { text: '📦 导出节点', callback_data: `sd_export_${session.id}` },
+                { text: '🔗 生成短链', callback_data: `sd_link_${session.id}` }
+            ],
+            [
+                { text: '⬅️ 返回列表', callback_data: `sd_back_${session.id}` },
+                { text: '🏠 主菜单', callback_data: 'cmd_menu' }
+            ]
+        ]
+    };
+}
+
+async function resolveTelegramSubscriptionSelection(userId, rawIndex, env, cache) {
+    const subscriptions = await getCachedSubscriptions(env, cache);
+    const config = await getTelegramPushConfig(env, cache);
+    const permission = checkUserPermission(userId, config);
+    const visibleItems = permission.allowed
+        ? subscriptions
+        : subscriptions.filter(item => item.source === 'telegram' && item.telegram_user_id === userId);
+    const visibleSubscriptions = visibleItems.filter(item => /^https?:\/\//i.test(item?.url || ''));
+
+    // Compatibility for list buttons emitted before the callback format was versioned.
+    if (rawIndex >= 0 && rawIndex < visibleSubscriptions.length) {
+        return { subscription: visibleSubscriptions[rawIndex], index: rawIndex };
+    }
+
+    const legacyItem = visibleItems[rawIndex];
+    if (!legacyItem || !/^https?:\/\//i.test(legacyItem.url || '')) return null;
+    const index = visibleSubscriptions.findIndex(item => (
+        legacyItem.id ? item.id === legacyItem.id : item === legacyItem || item.url === legacyItem.url
+    ));
+    return index >= 0 ? { subscription: visibleSubscriptions[index], index } : null;
+}
+
+async function resolveTelegramSubscriptionListSelection(userId, rawIndex, env, cache) {
+    const subscriptions = await getCachedSubscriptions(env, cache);
+    const config = await getTelegramPushConfig(env, cache);
+    const permission = checkUserPermission(userId, config);
+    const visibleItems = permission.allowed
+        ? subscriptions
+        : subscriptions.filter(item => item.source === 'telegram' && item.telegram_user_id === userId);
+    const visibleSubscriptions = visibleItems.filter(item => /^https?:\/\//i.test(item?.url || ''));
+    if (rawIndex < 0 || rawIndex >= visibleSubscriptions.length) return null;
+    return { subscription: visibleSubscriptions[rawIndex], index: rawIndex };
+}
+
+async function showStoredSubscriptionDetail(chatId, messageId, subscription, index, userId, env, cache, options = {}) {
+    const storageAdapter = await getCachedStorageAdapter(env, cache);
+    const preview = await fetchSubscriptionPreview(subscription.url, {
+        userAgent: subscription.customUserAgent || subscription.userAgent
+    });
+    if (preview.nodeUrls.length === 0) throw new Error('未识别到有效节点');
+
+    const session = createPreviewSession({
+        ...preview,
+        name: subscription.name || preview.name
+    }, userId, options.sessionId);
+    if (session.nodeUrls.length === 0) throw new Error('未识别到有效节点');
+
+    if (!subscription.id) subscription.id = generateId();
+    subscription.nodeCount = session.nodeUrls.length;
+    subscription.userInfo = preview.userInfo || null;
+    subscription.lastUpdate = new Date().toISOString();
+    subscription.lastError = null;
+    await persistCachedSubscriptions(env, cache);
+
+    session.savedSubscriptionId = subscription.id;
+    session.subscriptionIndex = index;
+    session.listPage = options.listPage ?? Math.floor(index / TELEGRAM_SUBSCRIPTION_LIST_PAGE_SIZE);
+    await persistPreviewSession(env, storageAdapter, session);
+
+    await editTelegramMessage(chatId, messageId, buildStoredSubscriptionDetailCard(session), env, {
+        requestCache: cache,
+        disable_web_page_preview: true,
+        reply_markup: buildStoredSubscriptionDetailKeyboard(session)
+    });
+    return session;
+}
+
+async function openStoredSubscriptionDetail(callbackQueryId, chatId, messageId, selected, userId, env, cache) {
+    await answerCallbackQuery(callbackQueryId, '正在解析订阅...', env);
+    try {
+        await showStoredSubscriptionDetail(
+            chatId,
+            messageId,
+            selected.subscription,
+            selected.index,
+            userId,
+            env,
+            cache
+        );
+    } catch (error) {
+        selected.subscription.lastError = error.message || '解析失败';
+        await persistCachedSubscriptions(env, cache);
+        await editTelegramMessage(
+            chatId,
+            messageId,
+            `❌ <b>订阅解析失败</b>\n\n${escapeHtml(truncateTelegramText(error.message, 500))}`,
+            env,
+            {
+                requestCache: cache,
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: '⬅️ 返回列表', callback_data: `list_page_sub_${Math.floor(selected.index / TELEGRAM_SUBSCRIPTION_LIST_PAGE_SIZE)}` }],
+                        [{ text: '🏠 主菜单', callback_data: 'cmd_menu' }]
+                    ]
+                }
+            }
+        );
+    }
+}
+
+async function deleteStoredSubscriptionDetail(session, env, cache) {
+    const subscriptions = await getCachedSubscriptions(env, cache);
+    const index = subscriptions.findIndex(item => item.id === session.savedSubscriptionId);
+    if (index === -1) return null;
+
+    const [deleted] = subscriptions.splice(index, 1);
+    await persistCachedSubscriptions(env, cache);
+
+    const profiles = await getCachedProfiles(env, cache);
+    let profilesChanged = false;
+    for (const profile of profiles) {
+        if (!Array.isArray(profile.subscriptions)) continue;
+        const next = profile.subscriptions.filter(id => id !== deleted.id);
+        if (next.length !== profile.subscriptions.length) {
+            profile.subscriptions = next;
+            profilesChanged = true;
+        }
+    }
+    if (profilesChanged) await persistCachedProfiles(env, cache);
+
+    const storageAdapter = await getCachedStorageAdapter(env, cache);
+    await clearAllNodeCaches(storageAdapter).catch(() => {});
+    return deleted;
+}
+
 async function showSubscriptionPreview(chatId, sourceUrl, userId, env, requestCache = null, options = {}) {
     const cache = requestCache || createRequestCache();
     const storageAdapter = await getCachedStorageAdapter(env, cache);
@@ -725,6 +910,7 @@ async function savePreviewSubscription(session, userId, env, cache) {
         };
         subscriptions.unshift(subscription);
     } else {
+        if (!subscription.id) subscription.id = generateId();
         subscription.nodeCount = session.nodeUrls.length;
         subscription.userInfo = session.userInfo || null;
         subscription.lastUpdate = now;
@@ -1182,7 +1368,7 @@ async function renderTelegramSubscriptionList(chatId, subscriptions, env, page =
         const name = truncateTelegramText(subscription.name || '未命名订阅', 32);
         rows.push([{
             text: `${summary.status} #${i + 1} ${name} [${summary.traffic}] ${summary.expiry}`,
-            callback_data: `node_action_sub_${i}`
+            callback_data: `sub_detail_${i}`
         }]);
     }
 
@@ -1226,8 +1412,9 @@ async function refreshTelegramSubscriptions(env, requestCache = null) {
                 const preview = await fetchSubscriptionPreview(subscription.url, {
                     userAgent: subscription.customUserAgent || subscription.userAgent
                 });
-                if (preview.nodeUrls.length === 0) throw new Error('未识别到有效节点');
-                subscription.nodeCount = preview.nodeUrls.length;
+                const nodes = parseNodeList(preview.nodeUrls.join('\n'));
+                if (nodes.length === 0) throw new Error('未识别到有效节点');
+                subscription.nodeCount = nodes.length;
                 subscription.userInfo = preview.userInfo || null;
                 subscription.lastUpdate = new Date().toISOString();
                 subscription.lastError = null;
@@ -2807,6 +2994,110 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
     const data = callbackQuery.data;
 
     try {
+        if (data.startsWith('sd_')) {
+            const match = data.match(/^sd_(refresh|delete|confirm|cancel|export|link|back)_(.+)$/);
+            if (!match) {
+                await answerCallbackQuery(callbackQuery.id, '无效操作', env, true);
+                return createJsonResponse({ ok: true });
+            }
+
+            const [, action, sessionId] = match;
+            const cache = requestCache || createRequestCache();
+            const storageAdapter = await getCachedStorageAdapter(env, cache);
+            const session = await readPreviewSession(env, storageAdapter, sessionId, userId);
+            if (!session) {
+                await answerCallbackQuery(callbackQuery.id, '订阅详情已过期，请返回列表重新打开', env, true);
+                return createJsonResponse({ ok: true });
+            }
+
+            if (action === 'back') {
+                await answerCallbackQuery(callbackQuery.id, '', env);
+                await handleListCommand(chatId, userId, env, session.listPage || 0, 'sub', messageId, cache);
+            } else if (action === 'refresh') {
+                await answerCallbackQuery(callbackQuery.id, '正在刷新订阅...', env);
+                const subscriptions = await getCachedSubscriptions(env, cache);
+                const subscription = subscriptions.find(item => item.id === session.savedSubscriptionId);
+                if (!subscription) {
+                    await sendTelegramMessage(chatId, '❌ 订阅不存在或已删除', env, { requestCache: cache });
+                } else {
+                    try {
+                        await showStoredSubscriptionDetail(
+                            chatId,
+                            messageId,
+                            subscription,
+                            session.subscriptionIndex,
+                            userId,
+                            env,
+                            cache,
+                            { sessionId: session.id, listPage: session.listPage }
+                        );
+                        await clearAllNodeCaches(storageAdapter).catch(() => {});
+                    } catch (error) {
+                        subscription.lastError = error.message || '更新失败';
+                        await persistCachedSubscriptions(env, cache);
+                        await sendTelegramMessage(chatId, `❌ 刷新订阅失败: ${escapeHtml(error.message)}`, env, { requestCache: cache });
+                    }
+                }
+            } else if (action === 'delete') {
+                await answerCallbackQuery(callbackQuery.id, '', env);
+                await editTelegramMessage(
+                    chatId,
+                    messageId,
+                    `⚠️ <b>确认删除订阅？</b>\n\n${escapeHtml(session.name || '未命名订阅')}\n此操作无法撤销。`,
+                    env,
+                    {
+                        requestCache: cache,
+                        reply_markup: {
+                            inline_keyboard: [[
+                                { text: '⚠️ 确认删除', callback_data: `sd_confirm_${session.id}` },
+                                { text: '❌ 取消', callback_data: `sd_cancel_${session.id}` }
+                            ]]
+                        }
+                    }
+                );
+            } else if (action === 'cancel') {
+                await answerCallbackQuery(callbackQuery.id, '已取消', env);
+                await editTelegramMessage(chatId, messageId, buildStoredSubscriptionDetailCard(session), env, {
+                    requestCache: cache,
+                    disable_web_page_preview: true,
+                    reply_markup: buildStoredSubscriptionDetailKeyboard(session)
+                });
+            } else if (action === 'confirm') {
+                const deleted = await deleteStoredSubscriptionDetail(session, env, cache);
+                if (!deleted) {
+                    await answerCallbackQuery(callbackQuery.id, '订阅不存在或已删除', env, true);
+                } else {
+                    await answerCallbackQuery(callbackQuery.id, '已删除', env);
+                    await handleListCommand(chatId, userId, env, session.listPage || 0, 'sub', messageId, cache);
+                }
+            } else if (action === 'export') {
+                await answerCallbackQuery(callbackQuery.id, '正在导出节点...', env);
+                await sendTelegramDocument(
+                    chatId,
+                    `${session.name || 'subscription'}.txt`,
+                    session.nodeUrls.join('\n'),
+                    env,
+                    `${session.name || '订阅'} · ${session.nodeUrls.length} 个节点`
+                );
+            } else if (action === 'link') {
+                await answerCallbackQuery(callbackQuery.id, '正在生成短链...', env);
+                const subscriptions = await getCachedSubscriptions(env, cache);
+                const subscription = subscriptions.find(item => item.id === session.savedSubscriptionId);
+                if (!subscription) {
+                    await sendTelegramMessage(chatId, '❌ 订阅不存在或已删除', env, { requestCache: cache });
+                } else {
+                    const profile = await ensurePreviewProfile(session, subscription, env, cache);
+                    const settings = await getCachedSettings(env, cache);
+                    const profileToken = settings.profileToken || 'profiles';
+                    const origin = new URL(request.url).origin;
+                    const link = `${origin}/${encodeURIComponent(profileToken)}/${encodeURIComponent(profile.customId || profile.id)}`;
+                    await sendTelegramMessage(chatId, `🔗 <b>MiSub 订阅链接</b>\n\n<code>${escapeHtml(link)}</code>`, env, { requestCache: cache });
+                }
+            }
+
+            return createJsonResponse({ ok: true });
+        }
+
         if (data.startsWith('sp_')) {
             const match = data.match(/^sp_(refresh|all|b64|yaml|link|save)_(.+)$/);
             if (!match) {
@@ -3059,7 +3350,32 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                         idxStr = data.replace('node_action_', '');
                     }
 
-                    const idx = parseInt(idxStr);
+                    if (!/^\d+$/.test(idxStr)) {
+                        await answerCallbackQuery(callbackQuery.id, '对象不存在', env, true);
+                        return createJsonResponse({ ok: true });
+                    }
+                    const idx = Number(idxStr);
+
+                    if (type === 'sub') {
+                        const cache = requestCache || createRequestCache();
+                        const selected = await resolveTelegramSubscriptionSelection(userId, idx, env, cache);
+                        if (!selected) {
+                            await answerCallbackQuery(callbackQuery.id, '对象不存在', env, true);
+                            return createJsonResponse({ ok: true });
+                        }
+
+                        await openStoredSubscriptionDetail(
+                            callbackQuery.id,
+                            chatId,
+                            messageId,
+                            selected,
+                            userId,
+                            env,
+                            cache
+                        );
+                        return createJsonResponse({ ok: true });
+                    }
+
                     const storageAdapter = await getStorageAdapter(env);
 
                     // 获取对应列表
@@ -3166,6 +3482,30 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                     await editTelegramMessage(chatId, messageId, message, env, {
                         reply_markup: { inline_keyboard: buttons }
                     });
+
+                } else if (data.startsWith('sub_detail_')) {
+                    const idxStr = data.replace('sub_detail_', '');
+                    if (!/^\d+$/.test(idxStr)) {
+                        await answerCallbackQuery(callbackQuery.id, '对象不存在', env, true);
+                        return createJsonResponse({ ok: true });
+                    }
+
+                    const cache = requestCache || createRequestCache();
+                    const selected = await resolveTelegramSubscriptionListSelection(userId, Number(idxStr), env, cache);
+                    if (!selected) {
+                        await answerCallbackQuery(callbackQuery.id, '对象不存在', env, true);
+                        return createJsonResponse({ ok: true });
+                    }
+
+                    await openStoredSubscriptionDetail(
+                        callbackQuery.id,
+                        chatId,
+                        messageId,
+                        selected,
+                        userId,
+                        env,
+                        cache
+                    );
 
                 } else if (data.startsWith('link_node_')) {
                     // 添加节点到订阅组

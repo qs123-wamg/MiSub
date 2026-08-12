@@ -98,6 +98,13 @@ function encodeUtf16Le(value) {
   return bytes;
 }
 
+function encodeBase64Utf8(value) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 describe('handleTelegramWebhook', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -998,7 +1005,7 @@ describe('handleTelegramWebhook', () => {
 
     const rows = body.reply_markup.inline_keyboard;
     expect(rows.slice(0, 10).every(row => row.length === 1)).toBe(true);
-    expect(rows[0][0]).toMatchObject({ callback_data: 'node_action_sub_0' });
+    expect(rows[0][0]).toMatchObject({ callback_data: 'sub_detail_0' });
     expect(rows[0][0].text).toContain('🟢 #1 Airport 1 [70.00 GB] 120天');
     expect(rows[1][0].text).toContain('🟠 #2 Airport 2 [71.00 GB] 7天');
     expect(rows[5][0].text).toContain('🟠 #6 Airport 6');
@@ -1023,7 +1030,7 @@ describe('handleTelegramWebhook', () => {
     expect(secondPageBody.text).toContain('第2/2页');
     expect(secondPageBody.reply_markup.inline_keyboard[0][0]).toMatchObject({
       text: expect.stringContaining('#11 Airport 11'),
-      callback_data: 'node_action_sub_10'
+      callback_data: 'sub_detail_10'
     });
     expect(secondPageBody.reply_markup.inline_keyboard.flat()).toEqual(expect.arrayContaining([
       expect.objectContaining({ text: '⬅️', callback_data: 'list_page_sub_0' }),
@@ -1163,6 +1170,227 @@ describe('handleTelegramWebhook', () => {
     expect(global.fetch.mock.calls.some(([url]) => String(url) === subscriptionUrl)).toBe(true);
   });
 
+  it('opens a rich stored-subscription detail with screenshot-style actions', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const subscriptionUrl = 'https://airport.example/detail/token';
+    const firstNode = 'anytls://password@one.example.com:443#剩余流量：41.96 GB';
+    const secondNode = 'anytls://password@two.example.com:443#距离下次重置剩余：116 天';
+    const { state, adapter } = createState({
+      subscriptions: [{
+        id: 'airport-detail',
+        name: '悠悠',
+        url: subscriptionUrl,
+        enabled: true,
+        customUserAgent: 'ClashMeta/1.0'
+      }]
+    });
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async (url, options) => {
+      if (String(url) === subscriptionUrl) {
+        expect(options.headers['User-Agent']).toBe('ClashMeta/1.0');
+        return new Response(encodeBase64Utf8(`${firstNode}\n${secondNode}\n`), {
+          status: 200,
+          headers: {
+            'Content-Disposition': 'attachment; filename=Remote-Name.yaml',
+            'subscription-userinfo': `upload=${20 * 1024 ** 3}; download=${138 * 1024 ** 3}; total=${200 * 1024 ** 3}; expire=${now + 116 * 86400}`
+          }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'open-subscription-detail',
+        data: 'sub_detail_0',
+        from: { id: 1 },
+        message: { message_id: 92, chat: { id: 4005 } }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions[0]).toMatchObject({
+      name: '悠悠',
+      nodeCount: 2,
+      userInfo: expect.objectContaining({ total: 200 * 1024 ** 3 }),
+      lastError: null,
+      lastUpdate: expect.any(String)
+    });
+    const editBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(editBody.text).toContain('<b>编号:</b> #1');
+    expect(editBody.text).toContain('<b>配置名称:</b> 悠悠');
+    expect(editBody.text).toContain(`<code>${subscriptionUrl}</code>`);
+    expect(editBody.text).toContain('<b>流量详情:</b> 158.00 GB / 200.00 GB');
+    expect(editBody.text).toContain('<b>使用进度:</b>');
+    expect(editBody.text).toContain('<b>剩余可用:</b> 42.00 GB');
+    expect(editBody.text).toContain('<blockquote expandable>🔌 <b>节点列表（共2个）</b>');
+    expect(editBody.text).toContain('1. [ANYTLS] 剩余流量：41.96 GB');
+    expect(editBody.text).toContain('2. [ANYTLS] 距离下次重置剩余：116 天');
+    expect(editBody.disable_web_page_preview).toBe(true);
+
+    const buttons = editBody.reply_markup.inline_keyboard;
+    expect(buttons).toHaveLength(3);
+    expect(buttons.every(row => row.length === 2)).toBe(true);
+    expect(buttons.flat().map(button => button.text)).toEqual([
+      '🔄 刷新订阅', '🗑️ 删除订阅',
+      '📦 导出节点', '🔗 生成短链',
+      '⬅️ 返回列表', '🏠 主菜单'
+    ]);
+    expect(buttons.flat().every(button => button.callback_data)).toBe(true);
+  });
+
+  it('supports stored-subscription refresh, export, short link, delete cancel, and list return', async () => {
+    const subscriptionUrl = 'https://airport.example/detail-actions';
+    const firstNode = 'trojan://password@first.example.com:443#First-Node';
+    const secondNode = 'trojan://password@second.example.com:443#Second-Node';
+    let nodes = [firstNode];
+    const { state, adapter } = createState({
+      subscriptions: [{
+        id: 'airport-detail-actions',
+        name: 'Action Airport',
+        url: subscriptionUrl,
+        enabled: true
+      }]
+    });
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url) === subscriptionUrl) {
+        return new Response(btoa(`${nodes.join('\n')}\n`), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    const invoke = data => handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: `detail-action-${data}`,
+        data,
+        from: { id: 1 },
+        message: { message_id: 93, chat: { id: 4006 } }
+      }
+    }), { MISUB_KV: null });
+
+    await invoke('sub_detail_0');
+    const detailBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    const detailButtons = detailBody.reply_markup.inline_keyboard.flat();
+    const callbackFor = label => detailButtons.find(button => button.text === label).callback_data;
+
+    nodes = [firstNode, secondNode];
+    await invoke(callbackFor('🔄 刷新订阅'));
+    expect(state.subscriptions[0].nodeCount).toBe(2);
+    const refreshedBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(refreshedBody.text).toContain('节点列表（共2个）');
+
+    await invoke(callbackFor('📦 导出节点'));
+    const documentCall = global.fetch.mock.calls.find(([url]) => String(url).includes('/sendDocument'));
+    expect(documentCall).toBeTruthy();
+    expect(await documentCall[1].body.get('document').text()).toBe(`${firstNode}\n${secondNode}`);
+
+    await invoke(callbackFor('🔗 生成短链'));
+    expect(state.profiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ subscriptions: ['airport-detail-actions'] })
+    ]));
+    const sentBodies = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body));
+    expect(sentBodies.some(body => body.text?.includes('https://example.com/profiles/tg-'))).toBe(true);
+
+    await invoke(callbackFor('🗑️ 删除订阅'));
+    const confirmBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(confirmBody.text).toContain('确认删除订阅');
+    const cancelCallback = confirmBody.reply_markup.inline_keyboard.flat()
+      .find(button => button.text === '❌ 取消').callback_data;
+    await invoke(cancelCallback);
+    expect(state.subscriptions).toHaveLength(1);
+    const cancelledBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(cancelledBody.text).toContain('<b>配置名称:</b> Action Airport');
+
+    await invoke(callbackFor('⬅️ 返回列表'));
+    const listBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(listBody.text).toContain('订阅列表 共1个');
+  });
+
+  it('deletes a stored subscription and removes profile references after confirmation', async () => {
+    const subscriptionUrl = 'https://airport.example/delete-detail';
+    const nodeUrl = 'trojan://password@delete.example.com:443#Delete-Node';
+    const { state, adapter } = createState({
+      subscriptions: [{
+        id: 'airport-delete-detail',
+        name: 'Delete Airport',
+        url: subscriptionUrl,
+        enabled: true
+      }],
+      profiles: [{
+        id: 'profile-delete-detail',
+        name: 'Delete Profile',
+        subscriptions: ['airport-delete-detail'],
+        manualNodes: []
+      }]
+    });
+    createAdapter.mockReturnValue(adapter);
+    global.fetch = vi.fn(async url => {
+      if (String(url) === subscriptionUrl) {
+        return new Response(btoa(`${nodeUrl}\n`), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    const invoke = data => handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: `delete-action-${data}`,
+        data,
+        from: { id: 1 },
+        message: { message_id: 94, chat: { id: 4007 } }
+      }
+    }), { MISUB_KV: null });
+
+    await invoke('sub_detail_0');
+    const detailBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    const deleteCallback = detailBody.reply_markup.inline_keyboard.flat()
+      .find(button => button.text === '🗑️ 删除订阅').callback_data;
+    await invoke(deleteCallback);
+    const confirmBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    const confirmCallback = confirmBody.reply_markup.inline_keyboard.flat()
+      .find(button => button.text === '⚠️ 确认删除').callback_data;
+    await invoke(confirmCallback);
+
+    expect(state.subscriptions).toHaveLength(0);
+    expect(state.profiles[0].subscriptions).toEqual([]);
+    expect(clearAllNodeCaches).toHaveBeenCalledWith(adapter);
+    const finalBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(finalBody.text).toContain('暂无机场订阅');
+  });
+
   it('opens an airport subscription from an old mixed /list callback index instead of reporting object missing', async () => {
     const subscriptions = Array.from({ length: 29 }, (_, i) => ({
       id: `node-${i + 1}`,
@@ -1192,6 +1420,13 @@ describe('handleTelegramWebhook', () => {
     });
     createAdapter.mockReturnValue(adapter);
 
+    global.fetch = vi.fn(async url => {
+      if (String(url) === 'https://airport.example/sub/token') {
+        return new Response(btoa('trojan://password@legacy.example.com:443#Legacy-Node\n'), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
     const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
     await handleTelegramWebhook(createRequest({
       callback_query: {
@@ -1202,7 +1437,9 @@ describe('handleTelegramWebhook', () => {
       }
     }), { MISUB_KV: null });
 
-    const fetchBodies = global.fetch.mock.calls.map(call => JSON.parse(call[1].body));
+    const fetchBodies = global.fetch.mock.calls
+      .filter(([, options]) => options?.body)
+      .map(([, options]) => JSON.parse(options.body));
     expect(fetchBodies).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ text: '对象不存在', show_alert: true })
     ]));
@@ -1214,7 +1451,8 @@ describe('handleTelegramWebhook', () => {
         reply_markup: expect.objectContaining({
           inline_keyboard: expect.arrayContaining([
             expect.arrayContaining([
-              expect.objectContaining({ callback_data: 'link_sub_0' })
+              expect.objectContaining({ text: '🔄 刷新订阅' }),
+              expect.objectContaining({ text: '🗑️ 删除订阅' })
             ])
           ])
         })
