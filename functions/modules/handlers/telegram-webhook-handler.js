@@ -29,11 +29,10 @@ import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS } from '../config.js';
 import { assertPublicNetworkUrl } from '../security-utils.js';
 import { extractValidNodes, parseNodeList } from '../utils/node-parser.js';
 import { getRegionEmoji } from '../utils/geo-utils.js';
-import { buildSubscriptionNodeCacheKey, isRealProxyNode, isRemoteSubscription, isSubscriptionEntry, parseSubscriptionUserInfoHeader } from '../../services/subscription-service.js';
+import { buildSubscriptionNodeCacheKey, isInlineSubscription, isRealProxyNode, isRemoteSubscription, isSubscriptionEntry, parseSubscriptionUserInfoHeader } from '../../services/subscription-service.js';
 import { generateClashConfig } from '../../utils/url-to-clash.js';
 const TELEGRAM_SUBSCRIPTION_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const TELEGRAM_PREVIEW_SESSION_PREFIX = 'tg_subscription_preview:';
-const TELEGRAM_PREVIEW_TTL_MS = 60 * 60 * 1000;
 const TELEGRAM_PREVIEW_NODE_LIMIT = 20;
 const TELEGRAM_SUBSCRIPTION_DETAIL_NODE_LIMIT = 50;
 const TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT = 240;
@@ -586,7 +585,7 @@ function getPreviewSessionKey(sessionId) {
 async function persistPreviewSession(env, storageAdapter, session) {
     const serialized = JSON.stringify(session);
     if (env?.MISUB_KV?.put) {
-        await env.MISUB_KV.put(getPreviewSessionKey(session.id), serialized, { expirationTtl: TELEGRAM_PREVIEW_TTL_MS / 1000 });
+        await env.MISUB_KV.put(getPreviewSessionKey(session.id), serialized);
         return;
     }
     await storageAdapter.put(getPreviewSessionKey(session.id), session);
@@ -601,13 +600,6 @@ async function readPreviewSession(env, storageAdapter, sessionId, userId) {
         session = await storageAdapter.get(getPreviewSessionKey(sessionId));
     }
     if (!session || String(session.userId) !== String(userId)) return null;
-    if (Number(session.expiresAt || 0) <= Date.now()) {
-        try {
-            if (env?.MISUB_KV?.delete) await env.MISUB_KV.delete(getPreviewSessionKey(sessionId));
-            else await storageAdapter.delete(getPreviewSessionKey(sessionId));
-        } catch {}
-        return null;
-    }
     return session;
 }
 
@@ -623,8 +615,22 @@ function createPreviewSession(preview, userId, sessionId = generateId()) {
         nodeUrls: nodes.map(node => node.url),
         userInfo: preview.userInfo || null,
         fetchedAt: preview.fetchedAt,
-        expiresAt: Date.now() + TELEGRAM_PREVIEW_TTL_MS,
         savedSubscriptionId: null
+    };
+}
+
+function createInlinePreviewSession(subscription, userId, filename = '') {
+    return {
+        id: generateId(),
+        userId,
+        sourceType: 'inline',
+        sourceUrl: subscription.url,
+        filename: String(filename || '').trim() || `${subscription.name}.txt`,
+        name: subscription.name,
+        nodeUrls: normalizeStoredNodeUrls(subscription.nodeUrls),
+        userInfo: subscription.userInfo || null,
+        fetchedAt: Date.parse(subscription.lastUpdate || '') || Date.now(),
+        savedSubscriptionId: subscription.id
     };
 }
 
@@ -650,11 +656,16 @@ function buildSubscriptionPreviewCard(session) {
     const regionText = regions.slice(0, 10).map(region => `${getRegionEmoji(region)}${region}`).join('、') || '未识别';
 
     const displayName = truncateTelegramText(session.name, 100);
-    const displayUrl = truncateTelegramText(session.sourceUrl, TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT);
+    const isInline = session.sourceType === 'inline' || String(session.sourceUrl || '').startsWith('inline:');
+    const displayUrl = isInline
+        ? `本地文件 · ${truncateTelegramText(session.filename || session.name, TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT)}`
+        : truncateTelegramText(session.sourceUrl, TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT);
     const escapedSourceUrl = escapeHtml(session.sourceUrl);
-    const sourceLink = session.sourceUrl.length <= TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT
-        ? `<a href="${escapedSourceUrl}">${escapeHtml(displayUrl)}</a>`
-        : `<code>${escapeHtml(displayUrl)}</code>`;
+    const sourceLink = isInline
+        ? `<code>${escapeHtml(displayUrl)}</code>`
+        : (session.sourceUrl.length <= TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT
+            ? `<a href="${escapedSourceUrl}">${escapeHtml(displayUrl)}</a>`
+            : `<code>${escapeHtml(displayUrl)}</code>`);
 
     let message = `📋 <b>机场名称:</b> <code>${escapeHtml(displayName)}</code>\n`;
     message += `🔗 <b>订阅链接:</b> ${sourceLink}\n`;
@@ -896,7 +907,6 @@ async function renderStoredSubscriptionDetail(chatId, messageId, subscription, i
         storedNodeCount: Math.max(nodeUrls.length, Number(subscription.nodeCount || 0)),
         userInfo: subscription.userInfo || null,
         fetchedAt: Date.parse(subscription.lastUpdate || '') || Date.now(),
-        expiresAt: Date.now() + TELEGRAM_PREVIEW_TTL_MS,
         savedSubscriptionId: subscription.id || null
     };
     session.isRemote = isRemoteSubscription(subscription);
@@ -1024,23 +1034,27 @@ async function showSubscriptionPreview(chatId, sourceUrl, userId, env, requestCa
 async function savePreviewSubscription(session, userId, env, cache) {
     const storageAdapter = await getCachedStorageAdapter(env, cache);
     const subscriptions = await getCachedSubscriptions(env, cache);
-    let subscription = subscriptions.find(item => item.url === session.sourceUrl);
+    const isInline = session.sourceType === 'inline' || String(session.sourceUrl || '').startsWith('inline:');
+    let subscription = subscriptions.find(item => item.id === session.savedSubscriptionId)
+        || subscriptions.find(item => item.url === session.sourceUrl);
 
     const now = new Date().toISOString();
     if (!subscription) {
-        subscription = {
-            id: generateId(),
-            name: session.name,
-            url: session.sourceUrl,
-            enabled: true,
-            source: 'telegram',
-            telegram_user_id: userId,
-            customUserAgent: TELEGRAM_SUBSCRIPTION_USER_AGENT,
-            nodeCount: session.nodeUrls.length,
-            userInfo: session.userInfo || null,
-            lastUpdate: now,
-            created_at: now
-        };
+        subscription = isInline
+            ? createInlineSubscription(session.nodeUrls, session.name, userId)
+            : {
+                id: generateId(),
+                name: session.name,
+                url: session.sourceUrl,
+                enabled: true,
+                source: 'telegram',
+                telegram_user_id: userId,
+                customUserAgent: TELEGRAM_SUBSCRIPTION_USER_AGENT,
+                nodeCount: session.nodeUrls.length,
+                userInfo: session.userInfo || null,
+                lastUpdate: now,
+                created_at: now
+            };
         subscriptions.unshift(subscription);
     } else {
         if (!subscription.id) subscription.id = generateId();
@@ -1048,7 +1062,13 @@ async function savePreviewSubscription(session, userId, env, cache) {
         subscription.nodeCount = session.nodeUrls.length;
         subscription.userInfo = session.userInfo || null;
         subscription.lastUpdate = now;
-        if (!subscription.customUserAgent) subscription.customUserAgent = TELEGRAM_SUBSCRIPTION_USER_AGENT;
+        if (isInline) {
+            subscription.type = 'inline';
+            subscription.url = `inline:${subscription.id}`;
+            subscription.nodeUrls = normalizeStoredNodeUrls(session.nodeUrls);
+        } else if (!subscription.customUserAgent) {
+            subscription.customUserAgent = TELEGRAM_SUBSCRIPTION_USER_AGENT;
+        }
     }
 
     await storageAdapter.putAllSubscriptions(subscriptions);
@@ -2795,6 +2815,7 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
         // 3. 批量处理与去重
         const addedNodes = [];
         const ignoredUrls = [];
+        let existingInlineSubscription = null;
 
         if (options.forceInline || nodeUrls.length > 1) {
             const inlineSubscription = createInlineSubscription(
@@ -2803,11 +2824,11 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
                 userId
             );
             const signature = inlineSubscription.nodeUrls.join('\n');
-            const exists = allSubscriptions.some(item => (
+            existingInlineSubscription = allSubscriptions.find(item => (
                 item?.type === 'inline'
                 && normalizeStoredNodeUrls(item.nodeUrls).join('\n') === signature
             ));
-            if (exists) {
+            if (existingInlineSubscription) {
                 ignoredUrls.push(...inlineSubscription.nodeUrls);
             } else {
                 allSubscriptions.unshift(inlineSubscription);
@@ -2837,6 +2858,16 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
         }
 
         if (addedNodes.length === 0) {
+            if (options.showSubscriptionPreviewCard && existingInlineSubscription) {
+                const session = createInlinePreviewSession(existingInlineSubscription, userId, options.inlineFilename);
+                await persistPreviewSession(env, storageAdapter, session);
+                await sendTelegramMessage(chatId, buildSubscriptionPreviewCard(session), env, {
+                    reply_markup: buildSubscriptionPreviewKeyboard(session),
+                    requestCache: cache,
+                    disable_web_page_preview: true
+                });
+                return createJsonResponse({ ok: true });
+            }
             await sendTelegramMessage(chatId,
                 `⚠️ <b>未添加任何节点</b>\n\n` +
                 `检测到 ${ignoredUrls.length} 个重复链接，已自动忽略。`,
@@ -2899,6 +2930,17 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
             console.info(`[Telegram Push] Cleared ${cacheResult?.cleared ?? 0} node caches after node import`);
         } catch (cacheError) {
             console.warn('[Telegram Push] Failed to clear node caches after node import:', cacheError?.message || cacheError);
+        }
+
+        if (options.showSubscriptionPreviewCard && addedNodes.length === 1 && isInlineSubscription(addedNodes[0])) {
+            const session = createInlinePreviewSession(addedNodes[0], userId, options.inlineFilename);
+            await persistPreviewSession(env, storageAdapter, session);
+            await sendTelegramMessage(chatId, buildSubscriptionPreviewCard(session), env, {
+                reply_markup: buildSubscriptionPreviewKeyboard(session),
+                requestCache: cache,
+                disable_web_page_preview: true
+            });
+            return createJsonResponse({ ok: true });
         }
 
         // 6. 发送反馈消息
@@ -2973,7 +3015,9 @@ async function handleTelegramDocumentInput(chatId, document, userId, env, reques
             rateLimitChecked: true,
             forceInline: true,
             skipSubscriptionPreview: true,
-            inlineName: getInlineSubscriptionName(filename)
+            inlineName: getInlineSubscriptionName(filename),
+            inlineFilename: filename,
+            showSubscriptionPreviewCard: true
         });
     } catch (error) {
         console.error('[Telegram Push] Document import failed:', error);
@@ -3238,14 +3282,30 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
             if (action === 'refresh') {
                 await answerCallbackQuery(callbackQuery.id, '正在刷新...', env);
                 try {
-                    const refreshedSession = await showSubscriptionPreview(chatId, session.sourceUrl, userId, env, cache, {
-                        sessionId: session.id,
-                        messageId,
-                        savedSubscriptionId: session.savedSubscriptionId
-                    });
-                    if (refreshedSession.savedSubscriptionId) {
-                        await savePreviewSubscription(refreshedSession, userId, env, cache);
-                        await clearAllNodeCaches(storageAdapter).catch(() => {});
+                    if (session.sourceType === 'inline') {
+                        const subscriptions = await getCachedSubscriptions(env, cache);
+                        const subscription = subscriptions.find(item => item.id === session.savedSubscriptionId);
+                        if (!isInlineSubscription(subscription)) throw new Error('本地文件订阅不存在或已删除');
+                        session.name = subscription.name;
+                        session.nodeUrls = normalizeStoredNodeUrls(subscription.nodeUrls);
+                        session.userInfo = subscription.userInfo || null;
+                        session.fetchedAt = Date.now();
+                        await persistPreviewSession(env, storageAdapter, session);
+                        await editTelegramMessage(chatId, messageId, buildSubscriptionPreviewCard(session), env, {
+                            reply_markup: buildSubscriptionPreviewKeyboard(session),
+                            requestCache: cache,
+                            disable_web_page_preview: true
+                        });
+                    } else {
+                        const refreshedSession = await showSubscriptionPreview(chatId, session.sourceUrl, userId, env, cache, {
+                            sessionId: session.id,
+                            messageId,
+                            savedSubscriptionId: session.savedSubscriptionId
+                        });
+                        if (refreshedSession.savedSubscriptionId) {
+                            await savePreviewSubscription(refreshedSession, userId, env, cache);
+                            await clearAllNodeCaches(storageAdapter).catch(() => {});
+                        }
                     }
                 } catch (error) {
                     await sendTelegramMessage(chatId, `❌ 刷新订阅失败: ${escapeHtml(error.message)}`, env, { requestCache: cache });

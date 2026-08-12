@@ -334,6 +334,51 @@ describe('handleTelegramWebhook', () => {
       .map(([, options]) => JSON.parse(options.body));
     expect(sentBodies.some(body => body.text?.includes('https://example.com/profiles/tg-'))).toBe(true);
   });
+
+  it('permanently stores an unsaved parsed subscription preview', async () => {
+    const subscriptionUrl = 'https://sub.example.com/permanent-preview';
+    const nodeUrl = 'trojan://password@permanent.example.com:443?security=tls#Permanent-Node';
+    const { state, adapter } = createState();
+    const kvData = new Map();
+    const kv = {
+      get: vi.fn(async key => kvData.get(key) || null),
+      put: vi.fn(async (key, value) => {
+        kvData.set(key, value);
+      }),
+      delete: vi.fn(async key => kvData.delete(key))
+    };
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (url === subscriptionUrl) {
+        return new Response(btoa(`${nodeUrl}\n`), {
+          status: 200,
+          headers: { 'Content-Disposition': 'attachment; filename=Permanent.yaml' }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: subscriptionUrl,
+        chat: { id: 2108 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: kv });
+
+    expect(state.subscriptions).toHaveLength(0);
+    const previewWrite = kv.put.mock.calls.find(([key]) => key.startsWith('tg_subscription_preview:'));
+    expect(previewWrite).toHaveLength(2);
+    expect(JSON.parse(previewWrite[1])).toMatchObject({
+      sourceUrl: subscriptionUrl,
+      name: 'Permanent',
+      nodeUrls: [nodeUrl],
+      savedSubscriptionId: null
+    });
+    expect(JSON.parse(previewWrite[1])).not.toHaveProperty('expiresAt');
+  });
   it('rejects private-network subscription URLs sent as plain messages', async () => {
     const { state, adapter } = createState();
     createAdapter.mockReturnValue(adapter);
@@ -442,7 +487,74 @@ describe('handleTelegramWebhook', () => {
       .filter(([url]) => String(url).includes('/sendMessage'))
       .map(([, options]) => JSON.parse(options.body));
     expect(sentBodies.some(body => body.text?.includes('正在解析文件'))).toBe(true);
-    expect(sentBodies.some(body => body.text?.includes('订阅源添加成功'))).toBe(true);
+    const card = sentBodies.find(body => body.text?.includes('机场名称:'));
+    expect(card.text).toContain('笔记 2026年7月27日 18_12_58');
+    expect(card.text).toContain('订阅链接:');
+    expect(card.text).toContain('本地文件 · 笔记 2026年7月27日 18_12_58.txt');
+    expect(card.text).toContain('协议类型:');
+    expect(card.text).toContain('节点总数:</b> 2');
+    expect(card.text).toContain('节点列表 (共 2 个)');
+    const buttons = card.reply_markup.inline_keyboard.flat();
+    expect(buttons).toHaveLength(6);
+    expect(buttons.map(button => button.text)).toEqual([
+      '🔄 刷新订阅信息',
+      '📄 显示全部节点',
+      '📤 导出Base64',
+      '📤 导出YAML',
+      '🔗 生成短链',
+      '✅ 已保存订阅'
+    ]);
+
+    const fileFetchCount = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/file/botbot-token/')).length;
+    const refreshCallback = buttons.find(button => button.callback_data.startsWith('sp_refresh_')).callback_data;
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'inline-preview-refresh',
+        data: refreshCallback,
+        from: { id: 1 },
+        message: { message_id: 98, chat: { id: 2105 } }
+      }
+    }), { MISUB_KV: null });
+    expect(global.fetch.mock.calls.filter(([url]) => String(url).includes('/file/botbot-token/'))).toHaveLength(fileFetchCount);
+    const refreshedCard = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(refreshedCard.text).toContain('节点总数:</b> 2');
+
+    const saveCallback = buttons.find(button => button.callback_data.startsWith('sp_save_')).callback_data;
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'inline-preview-save',
+        data: saveCallback,
+        from: { id: 1 },
+        message: { message_id: 98, chat: { id: 2105 } }
+      }
+    }), { MISUB_KV: null });
+    expect(state.subscriptions).toHaveLength(1);
+
+    const linkCallback = buttons.find(button => button.callback_data.startsWith('sp_link_')).callback_data;
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'inline-preview-link',
+        data: linkCallback,
+        from: { id: 1 },
+        message: { message_id: 98, chat: { id: 2105 } }
+      }
+    }), { MISUB_KV: null });
+    expect(state.subscriptions).toHaveLength(1);
+    expect(state.profiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        subscriptions: [state.subscriptions[0].id],
+        telegramPreviewSubscriptionId: state.subscriptions[0].id
+      })
+    ]));
+    const linkMessage = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(linkMessage.text).toContain('https://example.com/profiles/tg-');
   });
   it('decodes UTF-16LE Telegram text documents before parsing nodes', async () => {
     const nodeUrl = 'trojan://password@utf16.example.com:443?security=tls#UTF16-Node';
@@ -540,8 +652,10 @@ describe('handleTelegramWebhook', () => {
       .filter(([url]) => String(url).includes('/sendMessage'))
       .map(([, options]) => JSON.parse(options.body));
     expect(sentBodies.some(body => (
-      body.text?.includes('订阅源添加成功')
-      && body.text?.includes('内嵌订阅 · 2 节点')
+      body.text?.includes('机场名称:')
+      && body.text?.includes('mixed')
+      && body.text?.includes('节点总数:</b> 2')
+      && body.reply_markup?.inline_keyboard?.flat().length === 6
     ))).toBe(true);
   });
   it('imports Clash YAML documents through the shared subscription parser', async () => {
