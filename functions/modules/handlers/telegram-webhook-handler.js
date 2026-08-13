@@ -3381,7 +3381,7 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                     await sendTelegramMessage(chatId, '❌ 订阅不存在或已删除', env, { requestCache: cache });
                 } else {
                     try {
-                        const refreshed = await refreshStoredSubscriptionDetail(
+                        await refreshStoredSubscriptionDetail(
                             chatId,
                             messageId,
                             subscription,
@@ -3391,9 +3391,6 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                             cache,
                             { sessionId: session.id, listPage: session.listPage }
                         );
-                        await clearAllNodeCaches(storageAdapter, {
-                            preserveKeys: refreshed.cacheKey ? [refreshed.cacheKey] : []
-                        }).catch(() => {});
                     } catch (error) {
                         subscription.lastError = error.message || '更新失败';
                         await persistCachedSubscriptions(env, cache);
@@ -3511,7 +3508,7 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                         });
                         if (refreshedSession.savedSubscriptionId) {
                             await savePreviewSubscription(refreshedSession, userId, env, cache);
-                            await clearAllNodeCaches(storageAdapter).catch(() => {});
+                            await clearAllNodeCaches(storageAdapter, { preserveSubscriptionCaches: true }).catch(() => {});
                         }
                     }
                 } catch (error) {
@@ -3532,7 +3529,7 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
             } else if (action === 'save') {
                 await answerCallbackQuery(callbackQuery.id, '正在保存订阅...', env);
                 const subscription = await savePreviewSubscription(session, userId, env, cache);
-                await clearAllNodeCaches(storageAdapter).catch(() => {});
+                await clearAllNodeCaches(storageAdapter, { preserveSubscriptionCaches: true }).catch(() => {});
                 await editTelegramMessage(chatId, messageId, buildPreviewCard(session), env, {
                     reply_markup: buildSubscriptionPreviewKeyboard(session),
                     requestCache: cache,
@@ -3544,7 +3541,7 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                 await answerCallbackQuery(callbackQuery.id, '正在生成短链...', env);
                 const subscription = await savePreviewSubscription(session, userId, env, cache);
                 const profile = await ensurePreviewProfile(session, subscription, env, cache);
-                await clearAllNodeCaches(storageAdapter).catch(() => {});
+                await clearAllNodeCaches(storageAdapter, { preserveSubscriptionCaches: true }).catch(() => {});
                 const settings = await getCachedSettings(env, cache);
                 const profileToken = settings.profileToken || 'profiles';
                 const origin = new URL(request.url).origin;

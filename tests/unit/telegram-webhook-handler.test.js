@@ -238,7 +238,7 @@ describe('handleTelegramWebhook', () => {
       expect(state.profiles[0].manualNodes).toEqual([state.subscriptions[0].id]);
       expect(state.profiles[1].manualNodes).toEqual([]);
       expect(clearAllNodeCaches).toHaveBeenCalledTimes(1);
-      expect(clearAllNodeCaches).toHaveBeenCalledWith(adapter);
+      expect(clearAllNodeCaches).toHaveBeenCalledWith(adapter, { preserveSubscriptionCaches: true });
       expect(infoSpy).not.toHaveBeenCalledWith('[Telegram Push] User 1 added 1 items (Ignored 0)');
     } finally {
       infoSpy.mockRestore();
@@ -513,7 +513,7 @@ describe('handleTelegramWebhook', () => {
     expect(state.subscriptions).toHaveLength(1);
     expect(state.subscriptions[0]).toMatchObject({ name: 'Aws JP', url: nodeUrl });
     expect(state.subscriptions[0]).not.toHaveProperty('nodeCount');
-    expect(clearAllNodeCaches).toHaveBeenCalledWith(adapter);
+    expect(clearAllNodeCaches).toHaveBeenCalledWith(adapter, { preserveSubscriptionCaches: true });
     expect(state.profiles).toEqual(expect.arrayContaining([
       expect.objectContaining({
         subscriptions: [],
@@ -1899,6 +1899,58 @@ describe('handleTelegramWebhook', () => {
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
     expect(listBody.text).toContain('订阅列表 共1个');
+  });
+
+  it('keeps each subscription node cache when refreshing subscriptions one by one', async () => {
+    const firstUrl = 'https://airport.example/cache-first';
+    const secondUrl = 'https://airport.example/cache-second';
+    const firstNode = 'trojan://password@first-cache.example.com:443#First-Cache-Node';
+    const secondNode = 'trojan://password@second-cache.example.com:443#Second-Cache-Node';
+    const { state, adapter } = createState({
+      subscriptions: [
+        { id: 'cache-first', name: 'First Cache Airport', url: firstUrl, enabled: true },
+        { id: 'cache-second', name: 'Second Cache Airport', url: secondUrl, enabled: true }
+      ]
+    });
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url) === firstUrl) return new Response(btoa(`${firstNode}\n`), { status: 200 });
+      if (String(url) === secondUrl) return new Response(btoa(`${secondNode}\n`), { status: 200 });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    const invoke = data => handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: `sequential-cache-${data}`,
+        data,
+        from: { id: 1 },
+        message: { message_id: 98, chat: { id: 4010 } }
+      }
+    }), { MISUB_KV: null });
+
+    await invoke('sub_detail_0');
+    let detailBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    const firstRefresh = detailBody.reply_markup.inline_keyboard.flat()
+      .find(button => button.text === '🔄 刷新订阅').callback_data;
+    await invoke(firstRefresh);
+    expect(state.misc['node_cache_subscription_cache-first']?.nodes).toEqual([firstNode]);
+
+    await invoke('sub_detail_1');
+    detailBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    const secondRefresh = detailBody.reply_markup.inline_keyboard.flat()
+      .find(button => button.text === '🔄 刷新订阅').callback_data;
+    await invoke(secondRefresh);
+
+    expect(state.misc['node_cache_subscription_cache-first']?.nodes).toEqual([firstNode]);
+    expect(state.misc['node_cache_subscription_cache-second']?.nodes).toEqual([secondNode]);
   });
 
   it('deletes a stored subscription and removes profile references after confirmation', async () => {

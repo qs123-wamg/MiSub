@@ -201,6 +201,7 @@ export async function clearAllNodeCaches(storageAdapter, options = {}) {
                 ? options.preserveKeys.filter(isSubscriptionNodeCacheKey)
                 : []
         );
+        const preserveSubscriptionCaches = options?.preserveSubscriptionCaches === true;
 
         // 循环处理分页，KV list 默认最多返回 1000 个 key
         do {
@@ -233,7 +234,7 @@ export async function clearAllNodeCaches(storageAdapter, options = {}) {
             // 删除缓存
             for (const keyInfo of keys) {
                 const key = typeof keyInfo === 'string' ? keyInfo : (keyInfo.name || keyInfo);
-                if (preserveKeys.has(key)) {
+                if (preserveKeys.has(key) || (preserveSubscriptionCaches && isSubscriptionNodeCacheKey(key))) {
                     skipped++;
                     continue;
                 }

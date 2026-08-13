@@ -119,4 +119,30 @@ describe('node-cache-service', () => {
             'node_cache_subscription_sub-drop'
         ]);
     });
+
+    it('preserves all subscription protective caches when requested', async () => {
+        const deleted = [];
+        const storage = {
+            async list() {
+                return [
+                    'node_cache_token_main',
+                    'node_cache_profile_profile-1',
+                    'node_cache_subscription_sub-first',
+                    'node_cache_subscription_sub-second',
+                    'node_cache_subscription_url_abc123'
+                ];
+            },
+            async delete(key) {
+                deleted.push(key);
+            }
+        };
+
+        const result = await clearAllNodeCaches(storage, { preserveSubscriptionCaches: true });
+
+        expect(result).toEqual({ cleared: 2, failed: 0, skipped: 3 });
+        expect(deleted).toEqual([
+            'node_cache_token_main',
+            'node_cache_profile_profile-1'
+        ]);
+    });
 });
