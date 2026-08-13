@@ -34,7 +34,7 @@ import { generateClashConfig, urlToClashProxy } from '../../utils/url-to-clash.j
 const TELEGRAM_SUBSCRIPTION_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const TELEGRAM_SUBSCRIPTION_FALLBACK_USER_AGENT = 'clash-verge/v2.4.3';
 const TELEGRAM_PREVIEW_SESSION_PREFIX = 'tg_subscription_preview:';
-const TELEGRAM_PREVIEW_NODE_LIMIT = 20;
+const TELEGRAM_PREVIEW_NODE_LIMIT = 50;
 const TELEGRAM_SUBSCRIPTION_DETAIL_NODE_LIMIT = 50;
 const TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT = 240;
 const TELEGRAM_PREVIEW_MESSAGE_LIMIT = 3900;
@@ -903,11 +903,21 @@ function buildSubscriptionPreviewCard(session) {
         nodeLines.push(line);
     }
 
-    const hiddenCount = nodes.length - nodeLines.length;
-    if (hiddenCount > 0) {
-        const summary = `- …等 (${hiddenCount} 个更多节点未显示)`;
-        const candidate = `${message}${blockStart}${[...nodeLines, summary].join('\n')}${blockEnd}`;
-        if (candidate.length <= TELEGRAM_PREVIEW_MESSAGE_LIMIT) nodeLines.push(summary);
+    if (nodes.length > nodeLines.length) {
+        while (nodeLines.length > 0) {
+            const hiddenCount = nodes.length - nodeLines.length;
+            const summary = `- …等 (${hiddenCount} 个更多节点未显示)`;
+            const candidate = `${message}${blockStart}${[...nodeLines, summary].join('\n')}${blockEnd}`;
+            if (candidate.length <= TELEGRAM_PREVIEW_MESSAGE_LIMIT) {
+                nodeLines.push(summary);
+                break;
+            }
+            nodeLines.pop();
+        }
+
+        if (nodeLines.length === 0) {
+            nodeLines.push(`- …等 (${nodes.length} 个更多节点未显示)`);
+        }
     }
     if (nodeLines.length === 0) nodeLines.push('- 节点名称过长，请使用“显示全部节点”查看');
 

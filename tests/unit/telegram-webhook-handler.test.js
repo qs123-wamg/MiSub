@@ -352,6 +352,44 @@ describe('handleTelegramWebhook', () => {
     expect(sentBodies.some(body => body.text?.includes('https://example.com/profiles/tg-'))).toBe(true);
   });
 
+  it('shows up to 50 subscription preview nodes and preserves the hidden-node count', async () => {
+    const subscriptionUrl = 'https://sub.example.com/fifty-node-preview';
+    const nodeUrls = Array.from({ length: 55 }, (_, index) => (
+      `trojan://p@n${index + 1}.example.com:443#N${String(index + 1).padStart(2, '0')}`
+    ));
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (url === subscriptionUrl) {
+        return new Response(encodeBase64Utf8(`${nodeUrls.join('\n')}\n`), {
+          status: 200,
+          headers: { 'Content-Disposition': 'attachment; filename=Fifty-Node-Airport.yaml' }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: subscriptionUrl,
+        chat: { id: 2102 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    const card = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(card.text).toContain('节点列表 (共 55 个)');
+    expect(card.text).toContain('N50');
+    expect(card.text).not.toContain('N51');
+    expect(card.text).toContain('5 个更多节点未显示');
+  });
+
   it('permanently stores an unsaved parsed subscription preview', async () => {
     const subscriptionUrl = 'https://sub.example.com/permanent-preview';
     const nodeUrl = 'trojan://password@permanent.example.com:443?security=tls#Permanent-Node';
