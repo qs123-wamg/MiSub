@@ -26,7 +26,7 @@ import { StorageFactory } from '../../storage-adapter.js';
 import { clearAllNodeCaches } from '../../services/node-cache-service.js';
 import { createJsonResponse, createTimeoutFetch, escapeHtml, JSON_BODY_LIMITS, readJsonWithLimit } from '../utils.js';
 import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS } from '../config.js';
-import { assertPublicNetworkUrl } from '../security-utils.js';
+import { assertPublicNetworkUrl, redactUrl } from '../security-utils.js';
 import { extractValidNodes, parseNodeList } from '../utils/node-parser.js';
 import { getRegionEmoji } from '../utils/geo-utils.js';
 import { buildSubscriptionNodeCacheKey, isInlineSubscription, isRealProxyNode, isRemoteSubscription, isSubscriptionEntry, parseSubscriptionUserInfoHeader } from '../../services/subscription-service.js';
@@ -242,6 +242,51 @@ function decodeNodeText(input) {
     return parsedNodes.length > 0 ? parsedNodes : extractNodeUrls(input);
 }
 
+function describeNodeInputFailure(input) {
+    const content = String(input || '');
+    const trimmed = content.trim();
+    if (!trimmed) return '输入内容为空，没有可解析的数据';
+
+    const isStructuredConfig = /(?:^|[\s{,])["']?(?:proxies|proxy|outbounds|servers)["']?\s*:/i.test(trimmed)
+        || /^\s*\[(?:Proxy|Server Local|Server Remote)\]\s*$/im.test(trimmed);
+    if (isStructuredConfig) {
+        return '检测到结构化配置，但 proxies、outbounds 或服务器列表中没有可转换的有效节点';
+    }
+
+    const protocolMatches = [...trimmed.matchAll(/\b([a-z][a-z0-9+.-]*):\/\//gi)]
+        .map(match => match[1].toLowerCase());
+    if (protocolMatches.length > 0) {
+        const protocols = [...new Set(protocolMatches)];
+        return `检测到 ${protocols.join('、')} 链接，但节点格式校验未通过，可能是 UUID、Base64 编码、端口或协议参数无效`;
+    }
+
+    const compact = trimmed.replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/');
+    if (compact.length > 20 && /^[A-Za-z0-9+/=]+$/.test(compact)) {
+        try {
+            let normalized = compact;
+            while (normalized.length % 4) normalized += '=';
+            const decoded = atob(normalized);
+            if (!decoded.trim()) return 'Base64 解码成功，但解码后的内容为空';
+            return '内容看起来是 Base64，但解码后没有发现支持的节点链接或配置';
+        } catch {
+            return '内容看起来是 Base64，但编码不完整或无效';
+        }
+    }
+
+    return '内容不是受支持的节点链接、Base64 订阅、Clash YAML/JSON 或 sing-box 配置';
+}
+
+function formatTelegramFailureReason(error, maxLength = 1200) {
+    const rawReason = error?.message || String(error || '未知错误');
+    const safeReason = String(rawReason).replace(/https?:\/\/[^\s<>"'）)；;，,]+/gi, value => redactUrl(value));
+    return truncateTelegramText(safeReason, maxLength);
+}
+
+function buildTelegramParseFailureMessage(title, error) {
+    const reason = formatTelegramFailureReason(error);
+    return `❌ <b>${escapeHtml(title)}</b>\n\n<b>失败原因:</b> ${escapeHtml(reason)}`;
+}
+
 /**
  * 获取并解析远程订阅内容。
  */
@@ -415,16 +460,90 @@ async function fetchTelegramDocumentText(document, env, requestCache = null) {
     return readSubscriptionResponseText(fileResponse, '文件');
 }
 
+function getUrlHostname(url) {
+    try { return new URL(url).hostname || '上游服务器'; } catch { return '上游服务器'; }
+}
+
+function createSubscriptionHttpError(response, url) {
+    const statusText = String(response?.statusText || '').trim();
+    const suffix = statusText ? ` ${statusText}` : '';
+    return new Error(`下载阶段失败：${getUrlHostname(url)} 返回 HTTP ${response?.status}${suffix}`);
+}
+
+function createSubscriptionContentError(content, response, url) {
+    const text = String(content || '');
+    if (!text.trim()) {
+        return new Error(`内容解析阶段失败：${getUrlHostname(url)} 返回了空订阅内容`);
+    }
+    const contentType = String(response?.headers?.get('Content-Type') || '未知').split(';')[0].trim() || '未知';
+    return new Error(
+        `内容解析阶段失败：下载成功，但未识别到支持的节点格式` +
+        `（Content-Type: ${contentType}，内容长度: ${text.length} 字符）`
+    );
+}
+
+function extractEmbeddedSubscriptionUrl(converterUrl) {
+    const parsed = new URL(converterUrl);
+    const embedded = String(parsed.searchParams.get('url') || '').trim();
+    if (!/^https?:\/\//i.test(embedded)) return '';
+    const validated = assertPublicNetworkUrl(embedded).toString();
+    return validated === parsed.toString() ? '' : validated;
+}
+
+async function cancelResponseBody(response) {
+    try {
+        await response?.body?.cancel();
+    } catch {}
+}
+
 async function fetchSubscriptionPreview(url, options = {}) {
     const maxRedirects = 3;
-    let currentUrl = assertPublicNetworkUrl(url).toString();
+    const sourceUrl = options.sourceUrl || url;
+    const allowEmbeddedFallback = options.allowEmbeddedFallback !== false;
+    const redirectHistory = [];
+    let currentUrl;
+    try {
+        currentUrl = assertPublicNetworkUrl(url).toString();
+    } catch (error) {
+        throw new Error(`地址校验阶段失败：订阅地址无效或不安全（${error.message}）`);
+    }
     let userAgent = String(options.userAgent || '').trim() || TELEGRAM_SUBSCRIPTION_USER_AGENT;
     const fallbackUserAgent = userAgent.toLowerCase() === TELEGRAM_SUBSCRIPTION_FALLBACK_USER_AGENT
         ? ''
         : TELEGRAM_SUBSCRIPTION_FALLBACK_USER_AGENT;
     let usedFallbackUserAgent = false;
 
+    const tryEmbeddedFallback = async primaryError => {
+        if (!allowEmbeddedFallback) throw primaryError;
+
+        let fallbackUrl = '';
+        for (let index = redirectHistory.length - 1; index >= 0; index--) {
+            try {
+                fallbackUrl = extractEmbeddedSubscriptionUrl(redirectHistory[index]);
+            } catch (error) {
+                throw new Error(`${primaryError.message}；原始订阅回退被拒绝：${error.message}`);
+            }
+            if (fallbackUrl) break;
+        }
+        if (!fallbackUrl) throw primaryError;
+
+        try {
+            const fallbackPreview = await fetchSubscriptionPreview(fallbackUrl, {
+                userAgent,
+                sourceUrl,
+                allowEmbeddedFallback: false
+            });
+            return {
+                ...fallbackPreview,
+                sourceUrl
+            };
+        } catch (error) {
+            throw new Error(`${primaryError.message}；原始订阅回退失败：${error.message}`);
+        }
+    };
+
     for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount++) {
+        redirectHistory.push(currentUrl);
         let response;
         try {
             response = await createTimeoutFetch(currentUrl, {
@@ -436,8 +555,10 @@ async function fetchSubscriptionPreview(url, options = {}) {
                 }
             }, TELEGRAM_SUBSCRIPTION_TIMEOUT_MS);
         } catch (error) {
-            if (error?.name === 'AbortError') throw new Error('获取订阅超时');
-            throw error;
+            const reason = error?.name === 'AbortError'
+                ? `下载阶段失败：连接 ${getUrlHostname(currentUrl)} 超时`
+                : `下载阶段失败：无法连接 ${getUrlHostname(currentUrl)}（${error?.message || '网络错误'}）`;
+            return await tryEmbeddedFallback(new Error(reason));
         }
 
         if (
@@ -455,31 +576,64 @@ async function fetchSubscriptionPreview(url, options = {}) {
                     }
                 }, TELEGRAM_SUBSCRIPTION_TIMEOUT_MS);
                 if (fallbackResponse.status !== 401 && fallbackResponse.status !== 403) {
+                    await cancelResponseBody(response);
                     response = fallbackResponse;
                     userAgent = fallbackUserAgent;
                     usedFallbackUserAgent = true;
+                } else {
+                    await cancelResponseBody(fallbackResponse);
                 }
             } catch (error) {
-                if (error?.name === 'AbortError') throw new Error('获取订阅超时');
+                if (error?.name === 'AbortError') {
+                    return await tryEmbeddedFallback(
+                        new Error(`下载阶段失败：连接 ${getUrlHostname(currentUrl)} 超时`)
+                    );
+                }
             }
         }
 
         if ([301, 302, 303, 307, 308].includes(response.status)) {
             const location = response.headers.get('Location');
-            if (!location) throw new Error(`HTTP ${response.status}`);
-            if (redirectCount >= maxRedirects) throw new Error('订阅重定向次数过多');
-            currentUrl = assertPublicNetworkUrl(new URL(location, currentUrl).toString()).toString();
+            if (!location) {
+                await cancelResponseBody(response);
+                throw new Error(`跳转阶段失败：HTTP ${response.status} 响应缺少 Location`);
+            }
+            if (redirectCount >= maxRedirects) {
+                await cancelResponseBody(response);
+                throw new Error('跳转阶段失败：订阅重定向次数超过 3 次');
+            }
+            try {
+                currentUrl = assertPublicNetworkUrl(new URL(location, currentUrl).toString()).toString();
+            } catch (error) {
+                await cancelResponseBody(response);
+                throw new Error(`跳转阶段失败：重定向地址无效或不安全（${error.message}）`);
+            }
+            await cancelResponseBody(response);
             continue;
         }
 
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        if (!response.ok) {
+            const httpError = createSubscriptionHttpError(response, currentUrl);
+            await cancelResponseBody(response);
+            return await tryEmbeddedFallback(httpError);
+        }
 
-        const content = await readSubscriptionResponseText(response);
+        let content;
+        try {
+            content = await readSubscriptionResponseText(response);
+        } catch (error) {
+            return await tryEmbeddedFallback(
+                new Error(`内容读取阶段失败：${getUrlHostname(currentUrl)}（${error.message}）`)
+            );
+        }
 
         const nodeUrls = decodeNodeText(content);
+        if (nodeUrls.length === 0) {
+            return await tryEmbeddedFallback(createSubscriptionContentError(content, response, currentUrl));
+        }
         const filename = parseAttachmentFilename(response.headers.get('Content-Disposition'), currentUrl);
         return {
-            sourceUrl: url,
+            sourceUrl,
             finalUrl: currentUrl,
             filename,
             name: getSubscriptionDisplayName(filename, currentUrl),
@@ -491,7 +645,7 @@ async function fetchSubscriptionPreview(url, options = {}) {
         };
     }
 
-    throw new Error('订阅重定向次数过多');
+    throw new Error('跳转阶段失败：订阅重定向次数超过 3 次');
 }
 
 async function fetchSubscriptionNodeUrls(url) {
@@ -1085,7 +1239,7 @@ async function openStoredSubscriptionDetail(callbackQueryId, chatId, messageId, 
         await editTelegramMessage(
             chatId,
             messageId,
-            `❌ <b>订阅解析失败</b>\n\n${escapeHtml(truncateTelegramText(error.message, 500))}`,
+            buildTelegramParseFailureMessage('订阅解析失败', error),
             env,
             {
                 requestCache: cache,
@@ -1751,6 +1905,7 @@ async function refreshTelegramSubscriptions(env, requestCache = null) {
     let cursor = 0;
     let success = 0;
     let failed = 0;
+    const failures = [];
     const worker = async () => {
         while (cursor < targets.length) {
             const subscription = targets[cursor++];
@@ -1779,6 +1934,10 @@ async function refreshTelegramSubscriptions(env, requestCache = null) {
                 success++;
             } catch (error) {
                 subscription.lastError = error.message || '更新失败';
+                failures.push({
+                    name: subscription.name || getSubscriptionUrlHostname(subscription.url) || '未命名订阅',
+                    error: subscription.lastError
+                });
                 failed++;
             }
         }
@@ -1787,7 +1946,7 @@ async function refreshTelegramSubscriptions(env, requestCache = null) {
     await Promise.all(Array.from({ length: Math.min(4, targets.length) }, () => worker()));
     cache.subscriptions = subscriptions;
     await persistCachedSubscriptions(env, cache);
-    return { total: targets.length, success, failed };
+    return { total: targets.length, success, failed, failures };
 }
 
 /**
@@ -2975,7 +3134,12 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
                 try {
                     await showSubscriptionPreview(chatId, url, userId, env, cache);
                 } catch (error) {
-                    await sendTelegramMessage(chatId, `❌ 获取订阅失败: ${escapeHtml(error.message)}`, env, { requestCache: cache });
+                    await sendTelegramMessage(
+                        chatId,
+                        buildTelegramParseFailureMessage('订阅解析失败', error),
+                        env,
+                        { requestCache: cache }
+                    );
                 }
             }
 
@@ -2989,17 +3153,19 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
         try {
             nodeUrls = await resolveTelegramNodeInput(text);
         } catch (error) {
-            await sendTelegramMessage(chatId, `❌ 获取订阅失败: ${escapeHtml(error.message)}`, env);
+            await sendTelegramMessage(chatId, buildTelegramParseFailureMessage('订阅解析失败', error), env);
             return createJsonResponse({ ok: true });
         }
 
         if (nodeUrls.length === 0) {
-            await sendTelegramMessage(chatId,
-                '❌ <b>未识别到有效的链接</b>\n\n' +
-                '支持的内容：\n' +
-                '1. 节点链接 (SS, VMess, VLESS, Hysteria, etc.)\n' +
-                '2. 订阅链接 (HTTP/HTTPS)\n\n' +
-                '发送 /help 查看使用帮助',
+            const diagnosticInput = options.failureDiagnosticInput ?? text;
+            const reason = describeNodeInputFailure(diagnosticInput);
+            await sendTelegramMessage(
+                chatId,
+                `❌ <b>内容解析失败</b>\n\n` +
+                `<b>失败阶段:</b> 节点识别与格式校验\n` +
+                `<b>失败原因:</b> ${escapeHtml(reason)}\n` +
+                `<b>输入长度:</b> ${String(diagnosticInput || '').length} 字符`,
                 env
             );
             return createJsonResponse({ ok: true });
@@ -3216,13 +3382,19 @@ async function handleTelegramDocumentInput(chatId, document, userId, env, reques
             rateLimitChecked: true,
             forceInline: true,
             skipSubscriptionPreview: true,
+            failureDiagnosticInput: text,
             inlineName: getInlineSubscriptionName(filename),
             inlineFilename: filename,
             showSubscriptionPreviewCard: true
         });
     } catch (error) {
         console.error('[Telegram Push] Document import failed:', error);
-        await sendTelegramMessage(chatId, `❌ 文件解析失败: ${escapeHtml(error.message)}`, env, { requestCache: cache });
+        await sendTelegramMessage(
+            chatId,
+            buildTelegramParseFailureMessage('文件解析失败', error),
+            env,
+            { requestCache: cache }
+        );
         return createJsonResponse({ ok: true });
     }
 }
@@ -3394,7 +3566,12 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                     } catch (error) {
                         subscription.lastError = error.message || '更新失败';
                         await persistCachedSubscriptions(env, cache);
-                        await sendTelegramMessage(chatId, `❌ 刷新订阅失败: ${escapeHtml(error.message)}`, env, { requestCache: cache });
+                        await sendTelegramMessage(
+                            chatId,
+                            buildTelegramParseFailureMessage('刷新订阅失败', error),
+                            env,
+                            { requestCache: cache }
+                        );
                     }
                 }
             } else if (action === 'delete') {
@@ -3512,7 +3689,12 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                         }
                     }
                 } catch (error) {
-                    await sendTelegramMessage(chatId, `❌ 刷新订阅失败: ${escapeHtml(error.message)}`, env, { requestCache: cache });
+                    await sendTelegramMessage(
+                        chatId,
+                        buildTelegramParseFailureMessage('刷新订阅失败', error),
+                        env,
+                        { requestCache: cache }
+                    );
                 }
             } else if (action === 'all') {
                 await answerCallbackQuery(callbackQuery.id, '正在发送全部节点...', env);
@@ -3592,14 +3774,30 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
             try {
                 const result = await refreshTelegramSubscriptions(env, requestCache);
                 await handleListCommand(chatId, userId, env, page, 'sub', messageId, requestCache);
+                const failureLines = result.failures.slice(0, 5).map(item => {
+                    const safeName = escapeHtml(truncateTelegramText(item.name, 80));
+                    const safeReason = escapeHtml(formatTelegramFailureReason(item.error, 500));
+                    return `• <b>${safeName}</b>: ${safeReason}`;
+                });
+                const hiddenFailureCount = Math.max(0, result.failures.length - failureLines.length);
+                let resultMessage = `🔄 更新完成：成功 ${result.success} 个，失败 ${result.failed} 个`;
+                if (failureLines.length > 0) {
+                    resultMessage += `\n\n<b>失败原因:</b>\n${failureLines.join('\n')}`;
+                    if (hiddenFailureCount > 0) resultMessage += `\n• 另有 ${hiddenFailureCount} 个失败未展开`;
+                }
                 await sendTelegramMessage(
                     chatId,
-                    `🔄 更新完成：成功 ${result.success} 个，失败 ${result.failed} 个`,
+                    resultMessage,
                     env,
                     { requestCache }
                 );
             } catch (error) {
-                await sendTelegramMessage(chatId, `❌ 更新订阅失败: ${escapeHtml(error.message)}`, env, { requestCache });
+                await sendTelegramMessage(
+                    chatId,
+                    buildTelegramParseFailureMessage('更新订阅失败', error),
+                    env,
+                    { requestCache }
+                );
             }
             return createJsonResponse({ ok: true });
         }

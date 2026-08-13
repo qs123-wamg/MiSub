@@ -411,7 +411,9 @@ describe('handleTelegramWebhook', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
     expect(String(global.fetch.mock.calls[0][0])).toContain('api.telegram.org');
     const body = JSON.parse(global.fetch.mock.calls[0][1].body);
-    expect(body.text).toContain('获取订阅失败');
+    expect(body.text).toContain('订阅解析失败');
+    expect(body.text).toContain('地址校验阶段失败');
+    expect(body.text).toContain('订阅地址无效或不安全');
   });
   it('previews a single node parsed from Base64 and saves it only after callback', async () => {
     const nodeUrl = 'trojan://password@node.example.com:443?security=tls#Base64-Node';
@@ -935,7 +937,8 @@ describe('handleTelegramWebhook', () => {
     const sentBodies = global.fetch.mock.calls
       .filter(([url]) => String(url).includes('/sendMessage'))
       .map(([, options]) => JSON.parse(options.body));
-    expect(sentBodies.at(-1).text).toContain('未识别到有效的链接');
+    expect(sentBodies.at(-1).text).toContain('内容解析失败');
+    expect(sentBodies.at(-1).text).toContain('检测到结构化配置');
   });
   it('imports extensionless subscription files returned by some providers', async () => {
     const firstNode = 'trojan://password@one.example.com:443?security=tls#One';
@@ -1180,6 +1183,218 @@ describe('handleTelegramWebhook', () => {
     expect(sentBodies.some(body => body.text?.includes('Mixed'))).toBe(true);
     expect(sentBodies.some(body => body.text?.includes('Direct-Node'))).toBe(true);
     expect(sentBodies.some(body => body.text?.includes('来源类型:</b> 节点链接'))).toBe(true);
+  });
+  it('falls back to an embedded original subscription when a converter short link returns HTTP 502', async () => {
+    const shortUrl = 'https://suo.yt/MAK3R1r';
+    const originalUrl = 'http://154.23.242.65:61672/original-subscription';
+    const converterUrl = `https://api.wcc.best/sub?target=clash&url=${encodeURIComponent(originalUrl)}&emoji=true`;
+    const firstNode = 'vless://6d1ba774-7ca6-4768-8de6-4efd90d17905@154.23.242.65:61671?security=reality#US-Fastnet-Data';
+    const secondNode = 'hysteria2://password@154.23.242.65:61674/?sni=www.bing.com#US-HY2';
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url) === shortUrl) {
+        return new Response('', { status: 301, headers: { Location: converterUrl } });
+      }
+      if (String(url) === converterUrl) {
+        return new Response('error code: 502', { status: 502 });
+      }
+      if (String(url) === originalUrl) {
+        return new Response(encodeBase64Utf8(`${firstNode}\n${secondNode}\n`), {
+          status: 200,
+          headers: { 'Content-Disposition': 'attachment; filename=Original-Airport.yaml' }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: shortUrl,
+        chat: { id: 2115 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    expect(global.fetch.mock.calls.map(([url]) => String(url))).toEqual(expect.arrayContaining([
+      shortUrl,
+      converterUrl,
+      originalUrl
+    ]));
+    const previewBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(previewBody.text).toContain('Original-Airport');
+    expect(previewBody.text).toContain('节点总数:</b> 2');
+    expect(previewBody.text).toContain(shortUrl);
+    expect(previewBody.text).not.toContain(originalUrl);
+  });
+  it('falls back to an embedded original subscription when a converter returns empty content', async () => {
+    const shortUrl = 'https://suo.yt/empty-converter';
+    const originalUrl = 'https://origin.example.com/empty-converter-source';
+    const converterUrl = `https://api.wcc.best/sub?url=${encodeURIComponent(originalUrl)}`;
+    const nodeUrl = 'trojan://password@empty-fallback.example.com:443#Empty-Fallback-Node';
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url) === shortUrl) {
+        return new Response('', { status: 302, headers: { Location: converterUrl } });
+      }
+      if (String(url) === converterUrl) return new Response('', { status: 200 });
+      if (String(url) === originalUrl) return new Response(encodeBase64Utf8(`${nodeUrl}\n`), { status: 200 });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: shortUrl,
+        chat: { id: 2118 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    const previewBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(previewBody.text).toContain('Empty-Fallback-Node');
+    expect(previewBody.text).toContain('节点总数:</b> 1');
+  });
+  it('keeps the embedded original subscription across a converter redirect to an error endpoint', async () => {
+    const shortUrl = 'https://suo.yt/converter-error-endpoint';
+    const originalUrl = 'https://origin.example.com/redirected-converter-source';
+    const converterUrl = `https://api.wcc.best/sub?url=${encodeURIComponent(originalUrl)}`;
+    const converterErrorUrl = 'https://converter-cdn.example.com/errors/502';
+    const nodeUrl = 'trojan://password@redirect-fallback.example.com:443#Redirect-Fallback-Node';
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url) === shortUrl) {
+        return new Response('', { status: 302, headers: { Location: converterUrl } });
+      }
+      if (String(url) === converterUrl) {
+        return new Response('', { status: 302, headers: { Location: converterErrorUrl } });
+      }
+      if (String(url) === converterErrorUrl) return new Response('bad gateway', { status: 502 });
+      if (String(url) === originalUrl) {
+        return new Response(encodeBase64Utf8(`${nodeUrl}\n`), {
+          status: 200,
+          headers: { 'Content-Disposition': 'attachment; filename=Redirect-Original.yaml' }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: shortUrl,
+        chat: { id: 2119 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    expect(global.fetch.mock.calls.map(([url]) => String(url))).toEqual(expect.arrayContaining([
+      shortUrl,
+      converterUrl,
+      converterErrorUrl,
+      originalUrl
+    ]));
+    const previewBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(previewBody.text).toContain('Redirect-Original');
+    expect(previewBody.text).toContain('Redirect-Fallback-Node');
+    expect(previewBody.text).toContain(shortUrl);
+    expect(previewBody.text).not.toContain(originalUrl);
+    const previewSession = Object.values(state.misc)
+      .find(value => value?.sourceUrl === shortUrl);
+    expect(previewSession).toMatchObject({
+      sourceUrl: shortUrl,
+      finalUrl: originalUrl
+    });
+  });
+  it('reports both converter and original-source failures when short-link fallback fails', async () => {
+    const shortUrl = 'https://suo.yt/broken';
+    const originalUrl = 'https://origin.example.com/subscription';
+    const converterUrl = `https://api.wcc.best/sub?url=${encodeURIComponent(originalUrl)}`;
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url) === shortUrl) {
+        return new Response('', { status: 302, headers: { Location: converterUrl } });
+      }
+      if (String(url) === converterUrl) return new Response('bad gateway', { status: 502 });
+      if (String(url) === originalUrl) return new Response('unavailable', { status: 503 });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: shortUrl,
+        chat: { id: 2116 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    const errorBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(errorBody.text).toContain('订阅解析失败');
+    expect(errorBody.text).toContain('下载阶段失败');
+    expect(errorBody.text).toContain('api.wcc.best 返回 HTTP 502');
+    expect(errorBody.text).toContain('原始订阅回退失败');
+    expect(errorBody.text).toContain('origin.example.com 返回 HTTP 503');
+    expect(errorBody.text).not.toContain('/subscription');
+  });
+  it('rejects private embedded subscription URLs during converter fallback', async () => {
+    const shortUrl = 'https://suo.yt/private-fallback';
+    const converterUrl = `https://api.wcc.best/sub?url=${encodeURIComponent('http://127.0.0.1/private-sub')}`;
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url) === shortUrl) {
+        return new Response('', { status: 302, headers: { Location: converterUrl } });
+      }
+      if (String(url) === converterUrl) return new Response('bad gateway', { status: 502 });
+      if (String(url).startsWith('http://127.0.0.1')) {
+        throw new Error(`private fallback must not be fetched: ${url}`);
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: shortUrl,
+        chat: { id: 2117 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    expect(global.fetch.mock.calls.some(([url]) => String(url).startsWith('http://127.0.0.1'))).toBe(false);
+    const errorBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(errorBody.text).toContain('原始订阅回退被拒绝');
+    expect(errorBody.text).toContain('URL host is not allowed');
   });
   it('persists and reuses the Clash user-agent after a subscription preview gets HTTP 403', async () => {
     const subscriptionUrl = 'https://sub.example.com/ua-fallback';
@@ -1570,6 +1785,45 @@ describe('handleTelegramWebhook', () => {
       lastError: null,
       lastUpdate: expect.any(String)
     });
+  });
+  it('lists per-subscription failure reasons in bulk refresh results without exposing tokens', async () => {
+    const failedUrl = 'https://failed.example.com/very-secret-token-123?token=abc';
+    const { state, adapter } = createState({
+      subscriptions: [{
+        id: 'airport-bulk-failure',
+        name: 'Broken Airport',
+        url: failedUrl,
+        enabled: true
+      }]
+    });
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url) === failedUrl) throw new Error(`network error for ${failedUrl}`);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'refresh-all-with-failure-reason',
+        data: 'refresh_all_subs_0',
+        from: { id: 1 },
+        message: { message_id: 90, chat: { id: 4004 } }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions[0].lastError).toContain('下载阶段失败');
+    const resultBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(resultBody.text).toContain('更新完成：成功 0 个，失败 1 个');
+    expect(resultBody.text).toContain('Broken Airport');
+    expect(resultBody.text).toContain('下载阶段失败');
+    expect(resultBody.text).toContain('[REDACTED]');
+    expect(resultBody.text).not.toContain('very-secret-token-123');
+    expect(resultBody.text).not.toContain('token=abc');
   });
   it('uses each subscription custom user-agent during bulk refresh', async () => {
     const subscriptionUrl = 'https://airport.example/custom-user-agent';
