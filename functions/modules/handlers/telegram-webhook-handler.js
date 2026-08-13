@@ -1032,6 +1032,7 @@ function buildStoredSubscriptionDetailCard(session) {
 }
 
 function buildStoredSubscriptionDetailKeyboard(session) {
+    const copyableName = truncateTelegramText(session.name || '未命名订阅', 120);
     const firstRow = session.isRemote
         ? [
             { text: '🔄 刷新订阅', callback_data: `sd_refresh_${session.id}` },
@@ -1041,6 +1042,9 @@ function buildStoredSubscriptionDetailKeyboard(session) {
     return {
         inline_keyboard: [
             firstRow,
+            [
+                { text: '📋 复制配置名称', copy_text: { text: copyableName } }
+            ],
             [
                 { text: '📦 导出节点', callback_data: `sd_export_${session.id}` },
                 { text: '🔗 生成短链', callback_data: `sd_link_${session.id}` }

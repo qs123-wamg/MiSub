@@ -1934,14 +1934,19 @@ describe('handleTelegramWebhook', () => {
     expect(editBody.disable_web_page_preview).toBe(true);
 
     const buttons = editBody.reply_markup.inline_keyboard;
-    expect(buttons).toHaveLength(3);
-    expect(buttons.every(row => row.length === 2)).toBe(true);
+    expect(buttons).toHaveLength(4);
+    expect(buttons[1]).toEqual([{
+      text: '📋 复制配置名称',
+      copy_text: { text: '悠悠' }
+    }]);
     expect(buttons.flat().map(button => button.text)).toEqual([
       '🔄 刷新订阅', '🗑️ 删除订阅',
+      '📋 复制配置名称',
       '📦 导出节点', '🔗 生成短链',
       '⬅️ 返回列表', '🏠 主菜单'
     ]);
-    expect(buttons.flat().every(button => button.callback_data)).toBe(true);
+    expect(buttons.flat().filter(button => button.text !== '📋 复制配置名称')
+      .every(button => button.callback_data)).toBe(true);
   });
 
   it('shows stored metadata without fetching when no node-detail cache exists', async () => {
