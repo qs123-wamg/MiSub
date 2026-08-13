@@ -1923,7 +1923,7 @@ describe('handleTelegramWebhook', () => {
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
     expect(editBody.text).toContain('<b>编号:</b> #1');
-    expect(editBody.text).toContain('<b>配置名称:</b> 悠悠');
+    expect(editBody.text).toContain('<b>配置名称:</b> <code>悠悠</code>');
     expect(editBody.text).toContain(`<code>${subscriptionUrl}</code>`);
     expect(editBody.text).toContain('<b>流量详情:</b> 158.00 GB / 200.00 GB');
     expect(editBody.text).toContain('<b>使用进度:</b>');
@@ -2147,7 +2147,7 @@ describe('handleTelegramWebhook', () => {
       .filter(([url]) => String(url).includes('/editMessageText'))
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
-    expect(cancelledBody.text).toContain('<b>配置名称:</b> Action Airport');
+    expect(cancelledBody.text).toContain('<b>配置名称:</b> <code>Action Airport</code>');
 
     await invoke(callbackFor('⬅️ 返回列表'));
     const listBody = global.fetch.mock.calls

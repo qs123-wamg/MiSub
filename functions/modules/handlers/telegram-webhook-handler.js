@@ -997,7 +997,7 @@ function buildStoredSubscriptionDetailCard(session) {
     const name = truncateTelegramText(session.name || '未命名订阅', 120);
 
     let message = `<b>编号:</b> #${Number(session.subscriptionIndex || 0) + 1}\n`;
-    message += `<b>配置名称:</b> ${escapeHtml(name)}\n`;
+    message += `<b>配置名称:</b> <code>${escapeHtml(name)}</code>\n`;
     message += `<b>订阅来源:</b>\n<code>${escapeHtml(sourceUrl)}</code>\n`;
 
     if (total > 0) {
