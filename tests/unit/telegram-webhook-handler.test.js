@@ -289,6 +289,8 @@ describe('handleTelegramWebhook', () => {
     expect(card.text).toContain('节点总数:</b> 1');
     expect(card.text).toMatch(/使用进度:<\/b> [▰▱]{10} 3\.0%/);
     expect(card.text).toContain('Test-Node');
+    expect(card.text).toContain(`<code>${subscriptionUrl}</code>`);
+    expect(card.text).not.toContain('<a href=');
     expect(card.reply_markup.inline_keyboard).toHaveLength(3);
 
     const saveCallback = card.reply_markup.inline_keyboard.flat()

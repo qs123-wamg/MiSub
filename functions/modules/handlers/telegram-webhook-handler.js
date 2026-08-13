@@ -876,13 +876,8 @@ function buildSubscriptionPreviewCard(session) {
     const isInline = session.sourceType === 'inline' || String(session.sourceUrl || '').startsWith('inline:');
     const displayUrl = isInline
         ? `本地文件 · ${truncateTelegramText(session.filename || session.name, TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT)}`
-        : truncateTelegramText(session.sourceUrl, TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT);
-    const escapedSourceUrl = escapeHtml(session.sourceUrl);
-    const sourceLink = isInline
-        ? `<code>${escapeHtml(displayUrl)}</code>`
-        : (session.sourceUrl.length <= TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT
-            ? `<a href="${escapedSourceUrl}">${escapeHtml(displayUrl)}</a>`
-            : `<code>${escapeHtml(displayUrl)}</code>`);
+        : session.sourceUrl;
+    const sourceLink = `<code>${escapeHtml(displayUrl)}</code>`;
 
     let message = `📋 <b>机场名称:</b> <code>${escapeHtml(displayName)}</code>\n`;
     message += `🔗 <b>订阅链接:</b> ${sourceLink}\n`;
