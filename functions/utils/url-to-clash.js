@@ -4,6 +4,7 @@
 
 import yaml from 'js-yaml';
 import { extractNodeMetadata } from '../modules/utils/metadata-extractor.js';
+import { applyClashReferencePolicy } from '../modules/subscription/clash-reference-template.js';
 
 /**
  * 解析 URL 查询参数
@@ -1410,7 +1411,7 @@ export function applyClashExportBase(config = {}) {
         ...dnsExtensions
     } = existingDns && typeof existingDns === 'object' && !Array.isArray(existingDns) ? existingDns : {};
 
-    return {
+    return applyClashReferencePolicy({
         port: 7890,
         'socks-port': 7891,
         'allow-lan': false,
@@ -1428,7 +1429,7 @@ export function applyClashExportBase(config = {}) {
             ...dnsExtensions
         },
         ...content
-    };
+    });
 }
 
 export function serializeClashConfig(config, dumpOptions = {}) {

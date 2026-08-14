@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import yaml from 'js-yaml';
 import { generateBuiltinClashConfig, generateProxiesOnly } from '../../functions/modules/subscription/builtin-clash-generator.js';
+import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
 
 describe('Clash 内置生成器', () => {
     it('完整导出应使用统一的参考 Clash 基础配置', () => {
@@ -24,6 +25,17 @@ describe('Clash 内置生成器', () => {
         expect(config.dns).toMatchObject({ enable: true, 'use-hosts': true });
         expect(config.dns['default-nameserver']).toContain('119.29.29.29');
         expect(config.dns.nameserver).toContain('tls://dot.pub');
+
+        const groupNames = config['proxy-groups'].map(group => group.name);
+        expect(groupNames).toEqual(expect.arrayContaining(Object.values(CLASH_REFERENCE_GROUP_NAMES)));
+        const referenceSelectGroup = config['proxy-groups'].find(
+            group => group.name === CLASH_REFERENCE_GROUP_NAMES.select
+        );
+        expect(referenceSelectGroup.proxies).toContain('DIRECT');
+        expect(referenceSelectGroup.proxies.some(name => name.includes('HK-Test'))).toBe(true);
+        expect(config.rules.length).toBeGreaterThanOrEqual(9817);
+        expect(config.rules).toContain('DOMAIN,app.biliapi.net,' + CLASH_REFERENCE_GROUP_NAMES.bilibili);
+        expect(config.rules).toContain('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
     });
 
     it('应清理节点列表中的控制字符', () => {

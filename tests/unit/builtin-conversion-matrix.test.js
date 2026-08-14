@@ -1,5 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import yaml from 'js-yaml';
 import { ProcessorService } from '../../functions/services/processor-service.js';
+import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
 import {
     resolveBuiltinEngineFlags,
     resolveEffectiveEngine,
@@ -158,7 +160,12 @@ MATCH,MyGroup
         expect(result.content).toContain('proxies:');
         expect(result.content).not.toContain('rule-providers:');
         expect(result.content).not.toContain('RULE-SET,');
-        expect(result.content).toContain('MATCH,🚀 节点选择');
+        const parsed = yaml.load(result.content);
+        const fallbackGroup = parsed['proxy-groups'].find(
+            group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
+        );
+        expect(fallbackGroup.proxies[0]).toBe('🚀 节点选择');
+        expect(parsed.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
         expect(fetch).not.toHaveBeenCalled();
     });
 

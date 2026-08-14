@@ -6,6 +6,7 @@ import {
     handleRuleTemplatesRequest
 } from '../../functions/modules/rule-template-handler.js';
 import { ProcessorService } from '../../functions/services/processor-service.js';
+import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
 
 const NODE_LIST = 'trojan://pass@1.1.1.1:443#HK-01';
 
@@ -104,6 +105,10 @@ describe('自定义规则模板 Phase 1 后端模型/API/渲染', () => {
         expect(result.contentType).toBe('application/x-yaml; charset=utf-8');
         const parsed = yaml.load(result.content);
         expect(parsed['proxy-groups'].some(group => group.name === '🚀 节点选择')).toBe(true);
-        expect(parsed.rules).toContain('MATCH,🚀 节点选择');
+        const fallbackGroup = parsed['proxy-groups'].find(
+            group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
+        );
+        expect(fallbackGroup.proxies[0]).toBe('🚀 节点选择');
+        expect(parsed.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
     });
 });

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import yaml from 'js-yaml';
+import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
 
 const createAdapter = vi.fn();
 const getStorageType = vi.fn();
@@ -332,7 +333,11 @@ describe('handleTelegramWebhook', () => {
     expect(exportedConfig).toMatchObject({ port: 7890, 'socks-port': 7891, mode: 'Rule' });
     expect(exportedConfig.proxies).toHaveLength(1);
     expect(exportedConfig['proxy-groups'][0].proxies).toContain(exportedConfig.proxies[0].name);
-    expect(exportedConfig.rules).toEqual(['MATCH,🔰 选择节点']);
+    const fallbackGroup = exportedConfig['proxy-groups'].find(
+      group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
+    );
+    expect(fallbackGroup.proxies[0]).toBe('🔰 选择节点');
+    expect(exportedConfig.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
 
     const linkCallback = card.reply_markup.inline_keyboard.flat()
       .find(button => button.callback_data.startsWith('sp_link_')).callback_data;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import yaml from 'js-yaml';
 import { generateBuiltinClashConfig } from '../../functions/modules/subscription/builtin-clash-generator.js';
+import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
 
 const hiddifyUa = 'HiddifyNext/4.1.1 (android) like ClashMeta v2ray sing-box';
 
@@ -16,6 +17,10 @@ describe('Hiddify Clash compatibility', () => {
 
         expect(parsed.proxies).toHaveLength(1);
         expect(parsed).not.toHaveProperty('rule-providers');
-        expect(parsed.rules).toEqual(['MATCH,🚀 节点选择']);
+        const fallbackGroup = parsed['proxy-groups'].find(
+            group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
+        );
+        expect(fallbackGroup.proxies[0]).toBe('🚀 节点选择');
+        expect(parsed.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
     });
 });

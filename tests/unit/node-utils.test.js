@@ -3,6 +3,7 @@ import yaml from 'js-yaml';
 import { addFlagEmoji, prependNodeName } from '../../functions/utils/node-utils.js';
 import { convertClashProxyToUrl } from '../../functions/utils/clash-to-url.js';
 import { generateClashConfig, urlsToClashProxies } from '../../functions/utils/url-to-clash.js';
+import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
 
 function buildSsrUrl(name = '台湾 1') {
     return convertClashProxyToUrl({
@@ -136,6 +137,10 @@ describe('node-utils', () => {
         expect(config.proxies[0]).toMatchObject({ name: 'Test-Node', server: 'node.example.com', type: 'vless' });
         expect(config.proxies[0]).not.toHaveProperty('metadata');
         expect(config['proxy-groups'][0].proxies).toEqual(['Test-Node', 'DIRECT']);
-        expect(config.rules).toEqual(['MATCH,🔰 选择节点']);
+        const fallbackGroup = config['proxy-groups'].find(
+            group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
+        );
+        expect(fallbackGroup.proxies[0]).toBe('🔰 选择节点');
+        expect(config.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
     });
 });

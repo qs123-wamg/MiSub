@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import yaml from 'js-yaml';
 import { ProcessorService, isClashYamlProfileTemplate, isIniTemplateSource } from '../../functions/services/processor-service.js';
+import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
 
 const NODE_LIST = 'trojan://pass@1.1.1.1:443#HK-01';
 
@@ -41,7 +42,12 @@ MATCH,MyGroup
 
         expect(result.contentType).toBe('application/x-yaml; charset=utf-8');
         expect(result.content).toContain('name: MyGroup');
-        expect(result.content).toContain('MATCH,MyGroup');
+        const parsed = yaml.load(result.content);
+        const fallbackGroup = parsed['proxy-groups'].find(
+            group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
+        );
+        expect(fallbackGroup.proxies[0]).toBe('MyGroup');
+        expect(parsed.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
     });
 
     it('uses builtin rendering when templateSource is omitted', async () => {
@@ -151,7 +157,12 @@ rules:
         expect(result.content).toContain('proxies:');
         expect(result.content).not.toContain('rule-providers:');
         expect(result.content).not.toContain('RULE-SET,');
-        expect(result.content).toContain('MATCH,🚀 节点选择');
+        const parsed = yaml.load(result.content);
+        const fallbackGroup = parsed['proxy-groups'].find(
+            group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
+        );
+        expect(fallbackGroup.proxies[0]).toBe('🚀 节点选择');
+        expect(parsed.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
     });
 
     it('ignores ini templates for Hiddify Clash rendering to keep conservative compatibility output', async () => {
@@ -176,7 +187,12 @@ rules:
         expect(result.content).not.toContain('name: MyGroup');
         expect(result.content).not.toContain('rule-providers:');
         expect(result.content).not.toContain('RULE-SET,');
-        expect(result.content).toContain('MATCH,🚀 节点选择');
+        const parsed = yaml.load(result.content);
+        const fallbackGroup = parsed['proxy-groups'].find(
+            group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
+        );
+        expect(fallbackGroup.proxies[0]).toBe('🚀 节点选择');
+        expect(parsed.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
     });
 
     it('preserves managed config header for builtin quanx output', async () => {
