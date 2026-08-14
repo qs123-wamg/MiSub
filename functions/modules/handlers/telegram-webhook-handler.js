@@ -893,7 +893,7 @@ function buildSubscriptionPreviewCard(session) {
     message += `📊 <b>节点总数:</b> ${nodes.length} | <b>国家/地区数:</b> ${regions.length}\n`;
     message += `🏳️ <b>节点范围:</b> ${escapeHtml(regionText)}</blockquote>\n`;
 
-    const blockStart = `<blockquote expandable>📑 <b>节点列表 (共 ${nodes.length} 个)</b>\n`;
+    const blockStart = `<blockquote expandable>📑 节点列表 (共 ${nodes.length} 个)\n`;
     const blockEnd = '</blockquote>';
     const nodeLines = [];
     for (const node of nodes.slice(0, TELEGRAM_PREVIEW_NODE_LIMIT)) {
@@ -1027,19 +1027,19 @@ function buildStoredSubscriptionDetailCard(session) {
         const emptyText = nodeCount > 0
             ? '暂无已缓存节点明细，请点击“刷新订阅”更新'
             : '暂无已存储节点，请点击“刷新订阅”更新';
-        return `${message}<blockquote expandable>🔌 <b>节点列表（共${nodeCount}个）</b>\n${emptyText}</blockquote>`;
+        return `${message}<blockquote expandable>🔌 节点列表（共${nodeCount}个）\n${emptyText}</blockquote>`;
     }
 
     while (nodeLines.length > 0) {
         const limited = nodeLines.length < nodeCount ? `，仅显示前${nodeLines.length}个` : '';
-        const nodeBlock = `<blockquote expandable>🔌 <b>节点列表（共${nodeCount}个${limited}）</b>\n${nodeLines.join('\n')}</blockquote>`;
+        const nodeBlock = `<blockquote expandable>🔌 节点列表（共${nodeCount}个${limited}）\n${nodeLines.join('\n')}</blockquote>`;
         if (`${message}${nodeBlock}`.length <= TELEGRAM_PREVIEW_MESSAGE_LIMIT) {
             return `${message}${nodeBlock}`;
         }
         nodeLines.pop();
     }
 
-    return `${message}<blockquote expandable>🔌 <b>节点列表（共${nodeCount}个）</b>\n节点名称过长，请使用“导出节点”查看</blockquote>`;
+    return `${message}<blockquote expandable>🔌 节点列表（共${nodeCount}个）\n节点名称过长，请使用“导出节点”查看</blockquote>`;
 }
 
 function buildStoredSubscriptionDetailKeyboard(session) {
@@ -1570,7 +1570,7 @@ async function sendAllPreviewNodes(chatId, session, env) {
         return `${index + 1}. ${flag} ${escapeHtml(node.protocol || '未知')}: ${escapeHtml(truncateTelegramText(node.name || '未命名节点'))}`;
     });
     const chunks = [];
-    let current = `📄 <b>${escapeHtml(truncateTelegramText(session.name, 100))} · 全部节点 (${nodes.length})</b>\n\n`;
+    let current = `📄 ${escapeHtml(truncateTelegramText(session.name, 100))} · 全部节点 (${nodes.length})\n\n`;
     for (const line of lines) {
         if ((current + line + '\n').length > 3800) {
             chunks.push(current);
