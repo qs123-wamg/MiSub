@@ -898,7 +898,7 @@ function buildSubscriptionPreviewCard(session) {
     const nodeLines = [];
     for (const node of nodes.slice(0, TELEGRAM_PREVIEW_NODE_LIMIT)) {
         const flag = getRegionEmoji(node.region) || '🌐';
-        const line = `<b>- ${flag} ${escapeHtml(node.protocol || '未知')}: ${escapeHtml(truncateTelegramText(node.name || '未命名节点'))}</b>`;
+        const line = `- ${flag} ${escapeHtml(node.protocol || '未知')}: ${escapeHtml(truncateTelegramText(node.name || '未命名节点'))}`;
         const candidate = `${message}${blockStart}${[...nodeLines, line].join('\n')}${blockEnd}`;
         if (candidate.length > TELEGRAM_PREVIEW_MESSAGE_LIMIT) break;
         nodeLines.push(line);
@@ -907,7 +907,7 @@ function buildSubscriptionPreviewCard(session) {
     if (nodes.length > nodeLines.length) {
         while (nodeLines.length > 0) {
             const hiddenCount = nodes.length - nodeLines.length;
-            const summary = `<b>- …等 (${hiddenCount} 个更多节点未显示)</b>`;
+            const summary = `- …等 (${hiddenCount} 个更多节点未显示)`;
             const candidate = `${message}${blockStart}${[...nodeLines, summary].join('\n')}${blockEnd}`;
             if (candidate.length <= TELEGRAM_PREVIEW_MESSAGE_LIMIT) {
                 nodeLines.push(summary);
@@ -917,7 +917,7 @@ function buildSubscriptionPreviewCard(session) {
         }
 
         if (nodeLines.length === 0) {
-            nodeLines.push(`<b>- …等 (${nodes.length} 个更多节点未显示)</b>`);
+            nodeLines.push(`- …等 (${nodes.length} 个更多节点未显示)`);
         }
     }
     if (nodeLines.length === 0) nodeLines.push('- 节点名称过长，请使用“显示全部节点”查看');
@@ -1020,7 +1020,7 @@ function buildStoredSubscriptionDetailCard(session) {
     }
 
     let nodeLines = nodes.slice(0, TELEGRAM_SUBSCRIPTION_DETAIL_NODE_LIMIT).map((node, index) => (
-        `<b>${index + 1}. [${escapeHtml(String(node.protocol || '未知').toUpperCase())}] ${escapeHtml(truncateTelegramText(node.name || '未命名节点', 100))}</b>`
+        `${index + 1}. [${escapeHtml(String(node.protocol || '未知').toUpperCase())}] ${escapeHtml(truncateTelegramText(node.name || '未命名节点', 100))}`
     ));
 
     if (nodeLines.length === 0) {
