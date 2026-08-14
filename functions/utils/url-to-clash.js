@@ -2,6 +2,7 @@
  * 支持特殊参数：dialer-proxy、reality-opts 等
  */
 
+import yaml from 'js-yaml';
 import { extractNodeMetadata } from '../modules/utils/metadata-extractor.js';
 
 /**
@@ -1360,6 +1361,65 @@ export function urlsToClashProxies(urls, options = {}) {
         .filter(proxy => proxy !== null);
 }
 
+function createClashDnsConfig() {
+    return {
+        enable: true,
+        'use-hosts': true,
+        'default-nameserver': [
+            '119.29.29.29',
+            '223.5.5.5',
+            '223.6.6.6',
+            '114.114.114.114',
+            '8.8.8.8',
+            'tls://223.5.5.5',
+            'tls://223.6.6.6',
+            'tls://1.12.12.12',
+            'tls://120.53.53.53'
+        ],
+        nameserver: [
+            '119.29.29.29',
+            '223.5.5.5',
+            'tls://223.5.5.5',
+            'tls://223.6.6.6',
+            'tls://dot.pub',
+            'tls://1.12.12.12',
+            'tls://120.53.53.53'
+        ]
+    };
+}
+
+function serializeClashConfig(proxies) {
+    const cleanProxies = proxies.map(({ metadata, ...proxy }) => proxy);
+    const mainGroup = '\u{1F530} 选择节点';
+    const config = {
+        port: 7890,
+        'socks-port': 7891,
+        'allow-lan': false,
+        mode: 'Rule',
+        'log-level': 'info',
+        'external-controller': '127.0.0.1:9090',
+        'unified-delay': true,
+        hosts: {
+            'time.facebook.com': '17.253.84.125',
+            'time.android.com': '17.253.84.125'
+        },
+        dns: createClashDnsConfig(),
+        proxies: cleanProxies,
+        'proxy-groups': [{
+            name: mainGroup,
+            type: 'select',
+            proxies: [...cleanProxies.map(proxy => proxy.name), 'DIRECT']
+        }],
+        rules: ['MATCH,' + mainGroup]
+    };
+
+    return yaml.dump(config, {
+        indent: 2,
+        lineWidth: -1,
+        noRefs: true
+    });
+}
+
 /**
  * 生成完整的 Clash 配置
  * @param {string[]} urls - 节点 URL 数组
@@ -1373,14 +1433,5 @@ export function generateClashConfig(urls, options = {}) {
         return '';
     }
 
-    // 构建 YAML（简化版，不使用 js-yaml 以减少依赖）
-    let yaml = 'proxies:\n';
-
-    for (const proxy of proxies) {
-        // [元数据清理] 移除内部元数据字段，避免污染 YAML
-        const { metadata, ...rest } = proxy;
-        yaml += `  - ${JSON.stringify(rest)}\n`;
-    }
-
-    return yaml;
+    return serializeClashConfig(proxies);
 }

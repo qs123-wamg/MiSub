@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import yaml from 'js-yaml';
 
 const createAdapter = vi.fn();
 const getStorageType = vi.fn();
@@ -327,7 +328,11 @@ describe('handleTelegramWebhook', () => {
     const documentCall = global.fetch.mock.calls.find(([url]) => String(url).includes('/sendDocument'));
     expect(documentCall).toBeTruthy();
     expect(documentCall[1].body.get('document').name).toMatch(/\.yaml$/);
-    expect(await documentCall[1].body.get('document').text()).toContain('proxies:');
+    const exportedConfig = yaml.load(await documentCall[1].body.get('document').text());
+    expect(exportedConfig).toMatchObject({ port: 7890, 'socks-port': 7891, mode: 'Rule' });
+    expect(exportedConfig.proxies).toHaveLength(1);
+    expect(exportedConfig['proxy-groups'][0].proxies).toContain(exportedConfig.proxies[0].name);
+    expect(exportedConfig.rules).toEqual(['MATCH,🔰 选择节点']);
 
     const linkCallback = card.reply_markup.inline_keyboard.flat()
       .find(button => button.callback_data.startsWith('sp_link_')).callback_data;
@@ -551,7 +556,13 @@ describe('handleTelegramWebhook', () => {
     const documentCalls = global.fetch.mock.calls.filter(([url]) => String(url).includes('/sendDocument'));
     expect(documentCalls).toHaveLength(2);
     expect(await documentCalls[0][1].body.get('document').text()).toBe(encodeBase64Utf8(nodeUrl));
-    expect(await documentCalls[1][1].body.get('document').text()).toContain('"server":"awsjp.5671234.xyz"');
+    const exportedYaml = yaml.load(await documentCalls[1][1].body.get('document').text());
+    expect(exportedYaml.proxies[0]).toMatchObject({
+      server: 'awsjp.5671234.xyz',
+      port: 443,
+      type: 'vless'
+    });
+    expect(exportedYaml['proxy-groups'][0].proxies).toContain(exportedYaml.proxies[0].name);
 
     await invoke(buttons.find(button => button.callback_data.startsWith('sp_link_')).callback_data);
     expect(state.subscriptions).toHaveLength(1);

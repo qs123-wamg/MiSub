@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
+import yaml from 'js-yaml';
 import { addFlagEmoji, prependNodeName } from '../../functions/utils/node-utils.js';
 import { convertClashProxyToUrl } from '../../functions/utils/clash-to-url.js';
-import { urlsToClashProxies } from '../../functions/utils/url-to-clash.js';
+import { generateClashConfig, urlsToClashProxies } from '../../functions/utils/url-to-clash.js';
 
 function buildSsrUrl(name = '台湾 1') {
     return convertClashProxyToUrl({
@@ -119,5 +120,22 @@ describe('node-utils', () => {
                 host: 'abcd.apple.com:215275'
             }
         });
+    });
+
+    it('generateClashConfig 应生成完整且可解析的 Clash YAML', () => {
+        const url = 'vless://00000000-0000-4000-8000-000000000001@node.example.com:443?security=tls#Test-Node';
+        const config = yaml.load(generateClashConfig([url], { addFlagEmoji: false }));
+
+        expect(config).toMatchObject({
+            port: 7890,
+            'socks-port': 7891,
+            'allow-lan': false,
+            mode: 'Rule'
+        });
+        expect(config.dns).toMatchObject({ enable: true, 'use-hosts': true });
+        expect(config.proxies[0]).toMatchObject({ name: 'Test-Node', server: 'node.example.com', type: 'vless' });
+        expect(config.proxies[0]).not.toHaveProperty('metadata');
+        expect(config['proxy-groups'][0].proxies).toEqual(['Test-Node', 'DIRECT']);
+        expect(config.rules).toEqual(['MATCH,🔰 选择节点']);
     });
 });
