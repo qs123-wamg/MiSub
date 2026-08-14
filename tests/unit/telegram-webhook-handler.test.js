@@ -1500,6 +1500,61 @@ describe('handleTelegramWebhook', () => {
     expect(subscriptionRequests.at(-1)[1].headers['User-Agent']).toBe('clash-verge/v2.4.3');
     expect(state.subscriptions).toHaveLength(1);
   });
+  it('retries redirecting subscriptions with the Clash user-agent before following a decoy page', async () => {
+    const subscriptionUrl = 'https://sub.example.com/redirecting-user-agent';
+    const decoyUrl = 'https://www.apple.com/';
+    const yaml = [
+      'proxies:',
+      '  - name: Redirect-UA-Node',
+      '    type: vless',
+      '    server: redirect-ua.example.com',
+      '    port: 443',
+      '    uuid: 00000000-0000-4000-8000-000000000020',
+      '    tls: true'
+    ].join('\n');
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async (url, requestOptions = {}) => {
+      if (url === subscriptionUrl) {
+        if (requestOptions.headers?.['User-Agent'] !== 'clash-verge/v2.4.3') {
+          return new Response('', { status: 302, headers: { Location: decoyUrl } });
+        }
+        return new Response(yaml, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/html; charset=UTF-8',
+            'Content-Disposition': 'attachment; filename=apple'
+          }
+        });
+      }
+      if (url === decoyUrl) throw new Error('decoy page must not be fetched');
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: subscriptionUrl,
+        chat: { id: 2118 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    const subscriptionRequests = global.fetch.mock.calls.filter(([url]) => url === subscriptionUrl);
+    expect(subscriptionRequests).toHaveLength(2);
+    expect(subscriptionRequests[0][1].headers['User-Agent']).toContain('Mozilla/5.0');
+    expect(subscriptionRequests[1][1].headers['User-Agent']).toBe('clash-verge/v2.4.3');
+    expect(global.fetch.mock.calls.some(([url]) => url === decoyUrl)).toBe(false);
+
+    const previewBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(previewBody.text).toContain('Redirect-UA-Node');
+    expect(previewBody.text).toContain('节点总数:</b> 1');
+  });
   it('refreshes a saved preview in place without creating a duplicate subscription', async () => {
     const subscriptionUrl = 'https://sub.example.com/refresh';
     const firstNode = 'trojan://password@one.example.com:443?security=tls#Node-One';

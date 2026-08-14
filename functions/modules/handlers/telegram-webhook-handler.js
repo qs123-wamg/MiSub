@@ -33,6 +33,7 @@ import { buildSubscriptionNodeCacheKey, isInlineSubscription, isRealProxyNode, i
 import { generateClashConfig, urlToClashProxy } from '../../utils/url-to-clash.js';
 const TELEGRAM_SUBSCRIPTION_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const TELEGRAM_SUBSCRIPTION_FALLBACK_USER_AGENT = 'clash-verge/v2.4.3';
+const TELEGRAM_SUBSCRIPTION_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const TELEGRAM_PREVIEW_SESSION_PREFIX = 'tg_subscription_preview:';
 const TELEGRAM_PREVIEW_NODE_LIMIT = 50;
 const TELEGRAM_SUBSCRIPTION_DETAIL_NODE_LIMIT = 50;
@@ -562,7 +563,7 @@ async function fetchSubscriptionPreview(url, options = {}) {
         }
 
         if (
-            [401, 403].includes(response.status)
+            ([401, 403].includes(response.status) || TELEGRAM_SUBSCRIPTION_REDIRECT_STATUSES.has(response.status))
             && fallbackUserAgent
             && userAgent.toLowerCase() !== fallbackUserAgent
         ) {
@@ -575,7 +576,7 @@ async function fetchSubscriptionPreview(url, options = {}) {
                         'Accept': '*/*'
                     }
                 }, TELEGRAM_SUBSCRIPTION_TIMEOUT_MS);
-                if (fallbackResponse.status !== 401 && fallbackResponse.status !== 403) {
+                if (fallbackResponse.ok || TELEGRAM_SUBSCRIPTION_REDIRECT_STATUSES.has(fallbackResponse.status)) {
                     await cancelResponseBody(response);
                     response = fallbackResponse;
                     userAgent = fallbackUserAgent;
@@ -592,7 +593,7 @@ async function fetchSubscriptionPreview(url, options = {}) {
             }
         }
 
-        if ([301, 302, 303, 307, 308].includes(response.status)) {
+        if (TELEGRAM_SUBSCRIPTION_REDIRECT_STATUSES.has(response.status)) {
             const location = response.headers.get('Location');
             if (!location) {
                 await cancelResponseBody(response);
