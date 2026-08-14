@@ -4,6 +4,7 @@ import { parseIniTemplate } from '../../functions/modules/subscription/template-
 import { renderClashFromIniTemplate, renderLoonFromIniTemplate, renderQuanxFromIniTemplate, renderSingboxFromIniTemplate, renderSurgeFromIniTemplate } from '../../functions/modules/subscription/template-pipeline.js';
 import { getBuiltinTemplate } from '../../functions/modules/subscription/builtin-template-registry.js';
 import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
+import { CLASH_REFERENCE_RULES } from '../../functions/modules/subscription/clash-reference-rules.js';
 
 const SS2022_V2RAY_PLUGIN_NODE = 'ss://MjAyMi1ibGFrZTMtYWVzLTI1Ni1nY206TldSak1UVmxNVFZtTWpnMU5HRTVaRGsxT1dJd1pUUm1ZbVJrTnpkaU5qTT0@cf.090227.xyz:8080?plugin=v2ray-plugin%3Bmode%3Dwebsocket%3Bhost%3Dss.2227tsj.workers.dev%3Bpath%3D%2F%3Fenc%5C%3D2022-blake3-aes-256-gcm%3Bmux%3D0#2022-blake3-aes-256-gcm';
 
@@ -50,18 +51,16 @@ MATCH,节点选择
             port: 7890,
             'socks-port': 7891,
             'allow-lan': false,
-            mode: 'Rule',
-            'external-controller': '127.0.0.1:9090',
-            'unified-delay': true
+            mode: 'rule',
         });
         expect(parsed).not.toHaveProperty('mixed-port');
-        expect(parsed.dns).toMatchObject({ enable: true, 'use-hosts': true });
+        expect(parsed.dns).toMatchObject({ enable: true, ipv6: true, 'respect-rules': true });
         expect(parsed['proxy-groups'][0].name).toBe('节点选择');
         const fallbackGroup = parsed['proxy-groups'].find(
             group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
         );
-        expect(fallbackGroup.proxies[0]).toBe('节点选择');
-        expect(parsed.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
+        expect(fallbackGroup.proxies[0]).toBe(CLASH_REFERENCE_GROUP_NAMES.select);
+        expect(parsed.rules.slice(-CLASH_REFERENCE_RULES.length)).toEqual(CLASH_REFERENCE_RULES);
         expect(parsed.profile['subscription-url']).toBe('https://example.com/sub');
     });
 
@@ -467,7 +466,8 @@ custom_proxy_group=🚀 节点选择\`select\`[]DIRECT\`.*
         });
 
         const parsed = yaml.load(rendered);
-        const providers = Object.values(parsed['rule-providers'] || {});
+        const providers = Object.values(parsed['rule-providers'] || {})
+            .filter(provider => provider.url?.includes('/ACL4SSR/ACL4SSR/'));
         const providerUrls = providers.map(provider => provider.url);
 
         expect(providerUrls).toContain('https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Providers/ChinaCompanyIp.yaml');

@@ -7,6 +7,7 @@ import {
 } from '../../functions/modules/rule-template-handler.js';
 import { ProcessorService } from '../../functions/services/processor-service.js';
 import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
+import { CLASH_REFERENCE_RULES } from '../../functions/modules/subscription/clash-reference-rules.js';
 
 const NODE_LIST = 'trojan://pass@1.1.1.1:443#HK-01';
 
@@ -108,7 +109,7 @@ describe('自定义规则模板 Phase 1 后端模型/API/渲染', () => {
         const fallbackGroup = parsed['proxy-groups'].find(
             group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
         );
-        expect(fallbackGroup.proxies[0]).toBe('🚀 节点选择');
-        expect(parsed.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
+        expect(fallbackGroup.proxies[0]).toBe(CLASH_REFERENCE_GROUP_NAMES.select);
+        expect(parsed.rules.slice(-CLASH_REFERENCE_RULES.length)).toEqual(CLASH_REFERENCE_RULES);
     });
 });

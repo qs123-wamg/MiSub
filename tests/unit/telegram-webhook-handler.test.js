@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import yaml from 'js-yaml';
 import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
+import { CLASH_REFERENCE_RULES } from '../../functions/modules/subscription/clash-reference-rules.js';
 
 const createAdapter = vi.fn();
 const getStorageType = vi.fn();
@@ -330,14 +331,14 @@ describe('handleTelegramWebhook', () => {
     expect(documentCall).toBeTruthy();
     expect(documentCall[1].body.get('document').name).toMatch(/\.yaml$/);
     const exportedConfig = yaml.load(await documentCall[1].body.get('document').text());
-    expect(exportedConfig).toMatchObject({ port: 7890, 'socks-port': 7891, mode: 'Rule' });
+    expect(exportedConfig).toMatchObject({ port: 7890, 'socks-port': 7891, mode: 'rule' });
     expect(exportedConfig.proxies).toHaveLength(1);
     expect(exportedConfig['proxy-groups'][0].proxies).toContain(exportedConfig.proxies[0].name);
     const fallbackGroup = exportedConfig['proxy-groups'].find(
       group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
     );
-    expect(fallbackGroup.proxies[0]).toBe('🔰 选择节点');
-    expect(exportedConfig.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
+    expect(fallbackGroup.proxies[0]).toBe(CLASH_REFERENCE_GROUP_NAMES.select);
+    expect(exportedConfig.rules.slice(-CLASH_REFERENCE_RULES.length)).toEqual(CLASH_REFERENCE_RULES);
 
     const linkCallback = card.reply_markup.inline_keyboard.flat()
       .find(button => button.callback_data.startsWith('sp_link_')).callback_data;

@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yaml from 'js-yaml';
 import { ProcessorService } from '../../functions/services/processor-service.js';
 import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
+import { CLASH_REFERENCE_RULES } from '../../functions/modules/subscription/clash-reference-rules.js';
 import {
     resolveBuiltinEngineFlags,
     resolveEffectiveEngine,
@@ -158,14 +159,14 @@ MATCH,MyGroup
 
         expect(result.contentType).toBe('application/x-yaml; charset=utf-8');
         expect(result.content).toContain('proxies:');
-        expect(result.content).not.toContain('rule-providers:');
-        expect(result.content).not.toContain('RULE-SET,');
+        expect(result.content).toContain('rule-providers:');
+        expect(result.content).toContain('RULE-SET,');
         const parsed = yaml.load(result.content);
         const fallbackGroup = parsed['proxy-groups'].find(
             group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
         );
-        expect(fallbackGroup.proxies[0]).toBe('🚀 节点选择');
-        expect(parsed.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
+        expect(fallbackGroup.proxies[0]).toBe(CLASH_REFERENCE_GROUP_NAMES.select);
+        expect(parsed.rules.slice(-CLASH_REFERENCE_RULES.length)).toEqual(CLASH_REFERENCE_RULES);
         expect(fetch).not.toHaveBeenCalled();
     });
 

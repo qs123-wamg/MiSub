@@ -4,6 +4,7 @@ import { addFlagEmoji, prependNodeName } from '../../functions/utils/node-utils.
 import { convertClashProxyToUrl } from '../../functions/utils/clash-to-url.js';
 import { generateClashConfig, urlsToClashProxies } from '../../functions/utils/url-to-clash.js';
 import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
+import { CLASH_REFERENCE_RULES } from '../../functions/modules/subscription/clash-reference-rules.js';
 
 function buildSsrUrl(name = '台湾 1') {
     return convertClashProxyToUrl({
@@ -131,16 +132,24 @@ describe('node-utils', () => {
             port: 7890,
             'socks-port': 7891,
             'allow-lan': false,
-            mode: 'Rule'
+            mode: 'rule'
         });
-        expect(config.dns).toMatchObject({ enable: true, 'use-hosts': true });
+        expect(config.dns).toMatchObject({ enable: true, ipv6: true, 'respect-rules': true });
         expect(config.proxies[0]).toMatchObject({ name: 'Test-Node', server: 'node.example.com', type: 'vless' });
         expect(config.proxies[0]).not.toHaveProperty('metadata');
-        expect(config['proxy-groups'][0].proxies).toEqual(['Test-Node', 'DIRECT']);
+        const selectGroup = config['proxy-groups'].find(
+            group => group.name === CLASH_REFERENCE_GROUP_NAMES.select
+        );
+        expect(selectGroup.proxies).toEqual([
+            CLASH_REFERENCE_GROUP_NAMES.automatic,
+            'Test-Node',
+            'DIRECT',
+            'REJECT'
+        ]);
         const fallbackGroup = config['proxy-groups'].find(
             group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
         );
-        expect(fallbackGroup.proxies[0]).toBe('🔰 选择节点');
-        expect(config.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
+        expect(fallbackGroup.proxies[0]).toBe(CLASH_REFERENCE_GROUP_NAMES.select);
+        expect(config.rules.slice(-CLASH_REFERENCE_RULES.length)).toEqual(CLASH_REFERENCE_RULES);
     });
 });

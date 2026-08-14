@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import yaml from 'js-yaml';
 import { generateBuiltinClashConfig, generateProxiesOnly } from '../../functions/modules/subscription/builtin-clash-generator.js';
 import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
+import { CLASH_REFERENCE_RULES } from '../../functions/modules/subscription/clash-reference-rules.js';
 
 describe('Clash 内置生成器', () => {
     it('完整导出应使用统一的参考 Clash 基础配置', () => {
@@ -12,19 +13,33 @@ describe('Clash 内置生成器', () => {
             port: 7890,
             'socks-port': 7891,
             'allow-lan': false,
-            mode: 'Rule',
+            mode: 'rule',
             'log-level': 'info',
-            'external-controller': '127.0.0.1:9090',
-            'unified-delay': true
+            'geodata-mode': true,
+            'geo-auto-update': true,
+            'geodata-loader': 'standard',
+            'geo-update-interval': 24
         });
         expect(config).not.toHaveProperty('mixed-port');
-        expect(config.hosts).toMatchObject({
-            'time.facebook.com': '17.253.84.125',
-            'time.android.com': '17.253.84.125'
+        expect(config).not.toHaveProperty('external-controller');
+        expect(config).not.toHaveProperty('hosts');
+        expect(config.dns).toMatchObject({
+            enable: true,
+            ipv6: true,
+            'respect-rules': true,
+            'enhanced-mode': 'fake-ip'
         });
-        expect(config.dns).toMatchObject({ enable: true, 'use-hosts': true });
-        expect(config.dns['default-nameserver']).toContain('119.29.29.29');
-        expect(config.dns.nameserver).toContain('tls://dot.pub');
+        expect(config.dns.nameserver).toEqual([
+            'https://120.53.53.53/dns-query',
+            'https://223.5.5.5/dns-query'
+        ]);
+        expect(Object.keys(config['rule-providers'])).toEqual(expect.arrayContaining([
+            'geolocation-cn',
+            'cn',
+            'geolocation-!cn',
+            'private-ip',
+            'cn-ip'
+        ]));
 
         const groupNames = config['proxy-groups'].map(group => group.name);
         expect(groupNames).toEqual(expect.arrayContaining(Object.values(CLASH_REFERENCE_GROUP_NAMES)));
@@ -33,9 +48,8 @@ describe('Clash 内置生成器', () => {
         );
         expect(referenceSelectGroup.proxies).toContain('DIRECT');
         expect(referenceSelectGroup.proxies.some(name => name.includes('HK-Test'))).toBe(true);
-        expect(config.rules.length).toBeGreaterThanOrEqual(9817);
-        expect(config.rules).toContain('DOMAIN,app.biliapi.net,' + CLASH_REFERENCE_GROUP_NAMES.bilibili);
-        expect(config.rules).toContain('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
+        expect(config.rules.slice(-CLASH_REFERENCE_RULES.length)).toEqual(CLASH_REFERENCE_RULES);
+        expect(Buffer.byteLength(generateBuiltinClashConfig(node))).toBeLessThan(100_000);
     });
 
     it('应清理节点列表中的控制字符', () => {

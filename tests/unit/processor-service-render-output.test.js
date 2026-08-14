@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import yaml from 'js-yaml';
 import { ProcessorService, isClashYamlProfileTemplate, isIniTemplateSource } from '../../functions/services/processor-service.js';
 import { CLASH_REFERENCE_GROUP_NAMES } from '../../functions/modules/subscription/clash-reference-template.js';
+import { CLASH_REFERENCE_RULES } from '../../functions/modules/subscription/clash-reference-rules.js';
 
 const NODE_LIST = 'trojan://pass@1.1.1.1:443#HK-01';
 
@@ -46,8 +47,8 @@ MATCH,MyGroup
         const fallbackGroup = parsed['proxy-groups'].find(
             group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
         );
-        expect(fallbackGroup.proxies[0]).toBe('MyGroup');
-        expect(parsed.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
+        expect(fallbackGroup.proxies[0]).toBe(CLASH_REFERENCE_GROUP_NAMES.select);
+        expect(parsed.rules.slice(-CLASH_REFERENCE_RULES.length)).toEqual(CLASH_REFERENCE_RULES);
     });
 
     it('uses builtin rendering when templateSource is omitted', async () => {
@@ -118,12 +119,10 @@ rules:
             port: 7890,
             'socks-port': 7891,
             'allow-lan': false,
-            mode: 'Rule',
-            'external-controller': '127.0.0.1:9090',
-            'unified-delay': true
+            mode: 'rule',
         });
         expect(exportedConfig).not.toHaveProperty('mixed-port');
-        expect(exportedConfig.dns).toMatchObject({ enable: true, 'use-hosts': true });
+        expect(exportedConfig.dns).toMatchObject({ enable: true, ipv6: true, 'respect-rules': true });
     });
 
     it('detects Clash YAML profile templates by structure instead of treating them as ini templates', () => {
@@ -155,14 +154,14 @@ rules:
 
         expect(result.contentType).toBe('application/x-yaml; charset=utf-8');
         expect(result.content).toContain('proxies:');
-        expect(result.content).not.toContain('rule-providers:');
-        expect(result.content).not.toContain('RULE-SET,');
+        expect(result.content).toContain('rule-providers:');
+        expect(result.content).toContain('RULE-SET,');
         const parsed = yaml.load(result.content);
         const fallbackGroup = parsed['proxy-groups'].find(
             group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
         );
-        expect(fallbackGroup.proxies[0]).toBe('🚀 节点选择');
-        expect(parsed.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
+        expect(fallbackGroup.proxies[0]).toBe(CLASH_REFERENCE_GROUP_NAMES.select);
+        expect(parsed.rules.slice(-CLASH_REFERENCE_RULES.length)).toEqual(CLASH_REFERENCE_RULES);
     });
 
     it('ignores ini templates for Hiddify Clash rendering to keep conservative compatibility output', async () => {
@@ -185,14 +184,14 @@ rules:
         expect(fetch).not.toHaveBeenCalled();
         expect(result.content).toContain('proxies:');
         expect(result.content).not.toContain('name: MyGroup');
-        expect(result.content).not.toContain('rule-providers:');
-        expect(result.content).not.toContain('RULE-SET,');
+        expect(result.content).toContain('rule-providers:');
+        expect(result.content).toContain('RULE-SET,');
         const parsed = yaml.load(result.content);
         const fallbackGroup = parsed['proxy-groups'].find(
             group => group.name === CLASH_REFERENCE_GROUP_NAMES.fallback
         );
-        expect(fallbackGroup.proxies[0]).toBe('🚀 节点选择');
-        expect(parsed.rules.at(-1)).toBe('MATCH,' + CLASH_REFERENCE_GROUP_NAMES.fallback);
+        expect(fallbackGroup.proxies[0]).toBe(CLASH_REFERENCE_GROUP_NAMES.select);
+        expect(parsed.rules.slice(-CLASH_REFERENCE_RULES.length)).toEqual(CLASH_REFERENCE_RULES);
     });
 
     it('preserves managed config header for builtin quanx output', async () => {

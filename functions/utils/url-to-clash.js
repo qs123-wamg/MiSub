@@ -1399,37 +1399,17 @@ export function applyClashExportBase(config = {}) {
         'log-level': _logLevel,
         'external-controller': _externalController,
         'unified-delay': _unifiedDelay,
-        hosts: existingHosts,
-        dns: existingDns,
+        hosts: _hosts,
+        dns: _dns,
+        'geodata-mode': _geodataMode,
+        'geo-auto-update': _geoAutoUpdate,
+        'geodata-loader': _geodataLoader,
+        'geo-update-interval': _geoUpdateInterval,
+        'geox-url': _geoxUrl,
         ...content
     } = config && typeof config === 'object' && !Array.isArray(config) ? config : {};
-    const {
-        enable: _dnsEnable,
-        'use-hosts': _dnsUseHosts,
-        'default-nameserver': _defaultNameserver,
-        nameserver: _nameserver,
-        ...dnsExtensions
-    } = existingDns && typeof existingDns === 'object' && !Array.isArray(existingDns) ? existingDns : {};
 
-    return applyClashReferencePolicy({
-        port: 7890,
-        'socks-port': 7891,
-        'allow-lan': false,
-        mode: 'Rule',
-        'log-level': 'info',
-        'external-controller': '127.0.0.1:9090',
-        'unified-delay': true,
-        hosts: {
-            'time.facebook.com': '17.253.84.125',
-            'time.android.com': '17.253.84.125',
-            ...(existingHosts && typeof existingHosts === 'object' && !Array.isArray(existingHosts) ? existingHosts : {})
-        },
-        dns: {
-            ...createClashDnsConfig(),
-            ...dnsExtensions
-        },
-        ...content
-    });
+    return applyClashReferencePolicy(content);
 }
 
 export function serializeClashConfig(config, dumpOptions = {}) {

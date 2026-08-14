@@ -1,113 +1,189 @@
 import { CLASH_REFERENCE_RULES } from './clash-reference-rules.js';
 
 export const CLASH_REFERENCE_GROUP_NAMES = Object.freeze({
-    select: '\u{1F530} \u9009\u62E9\u8282\u70B9',
-    bilibili: '\u{1F30F} \u7231\u5947\u827A&\u54D4\u54E9\u54D4\u54E9',
-    bahamut: '\u{1F4FA} \u52A8\u753B\u75AF',
-    steamDownload: '\u{1F3AE} Steam \u767B\u5F55/\u4E0B\u8F7D',
-    steamStore: '\u{1F3AE} Steam \u5546\u5E97/\u793E\u533A',
-    cloudflare: '\u{1F329}\uFE0F Cloudflare',
-    onedrive: '\u2601\uFE0F OneDrive',
-    academic: '\u{1F393}\u5B66\u672F\u7F51\u7AD9',
-    domestic: '\u{1F1E8}\u{1F1F3} \u56FD\u5185\u7F51\u7AD9',
-    rejectAds: '\u{1F6D1} \u62E6\u622A\u5E7F\u544A',
+    select: '\u{1F680} \u8282\u70B9\u9009\u62E9',
+    automatic: '\u26A1 \u81EA\u52A8\u9009\u62E9',
+    private: '\u{1F3E0} \u79C1\u6709\u7F51\u7EDC',
+    domestic: '\u{1F512} \u56FD\u5185\u670D\u52A1',
+    nonChina: '\u{1F310} \u975E\u4E2D\u56FD',
     fallback: '\u{1F41F} \u6F0F\u7F51\u4E4B\u9C7C'
 });
 
-const REFERENCE_GROUP_NAME_SET = new Set(Object.values(CLASH_REFERENCE_GROUP_NAMES));
-
+const REFERENCE_GROUP_NAME_SET = new Set([
+    ...Object.values(CLASH_REFERENCE_GROUP_NAMES),
+    '\u{1F530} \u9009\u62E9\u8282\u70B9',
+    '\u{1F30F} \u7231\u5947\u827A&\u54D4\u54E9\u54D4\u54E9',
+    '\u{1F4FA} \u52A8\u753B\u75AF',
+    '\u{1F3AE} Steam \u767B\u5F55/\u4E0B\u8F7D',
+    '\u{1F3AE} Steam \u5546\u5E97/\u793E\u533A',
+    '\u{1F329}\uFE0F Cloudflare',
+    '\u2601\uFE0F OneDrive',
+    '\u{1F393}\u5B66\u672F\u7F51\u7AD9',
+    '\u{1F1E8}\u{1F1F3} \u56FD\u5185\u7F51\u7AD9',
+    '\u{1F6D1} \u62E6\u622A\u5E7F\u544A'
+]);
 function unique(items) {
     return [...new Set(items.filter(Boolean))];
 }
 
-function getSearchableProxyText(proxy) {
-    const metadata = proxy?.metadata && typeof proxy.metadata === 'object'
-        ? Object.values(proxy.metadata).join(' ')
-        : '';
-    return String(proxy?.name || '') + ' ' + metadata;
+function createGeoxUrls() {
+    return {
+        geoip: 'https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat',
+        geosite: 'https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat',
+        mmdb: 'https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb',
+        asn: 'https://github.com/xishang0128/geoip/releases/download/latest/GeoLite2-ASN.mmdb'
+    };
 }
 
-function selectProxyNames(proxies, patterns) {
-    return proxies
-        .filter(proxy => {
-            const text = getSearchableProxyText(proxy);
-            return patterns.some(pattern => pattern.test(text));
-        })
-        .map(proxy => proxy.name)
-        .filter(Boolean);
+function createRuleProviders() {
+    const baseUrl = 'https://gh-proxy.com/https://github.com/MetaCubeX/meta-rules-dat/raw/refs/heads/meta/geo/';
+    return {
+        'geolocation-cn': {
+            type: 'http',
+            format: 'mrs',
+            behavior: 'domain',
+            url: baseUrl + 'geosite/geolocation-cn.mrs',
+            path: './ruleset/geolocation-cn.mrs',
+            interval: 86400
+        },
+        cn: {
+            type: 'http',
+            format: 'mrs',
+            behavior: 'domain',
+            url: baseUrl + 'geosite/cn.mrs',
+            path: './ruleset/cn.mrs',
+            interval: 86400
+        },
+        'geolocation-!cn': {
+            type: 'http',
+            format: 'mrs',
+            behavior: 'domain',
+            url: baseUrl + 'geosite/geolocation-!cn.mrs',
+            path: './ruleset/geolocation-!cn.mrs',
+            interval: 86400
+        },
+        'private-ip': {
+            type: 'http',
+            format: 'mrs',
+            behavior: 'ipcidr',
+            url: baseUrl + 'geoip/private.mrs',
+            path: './ruleset/private-ip.mrs',
+            interval: 86400
+        },
+        'cn-ip': {
+            type: 'http',
+            format: 'mrs',
+            behavior: 'ipcidr',
+            url: baseUrl + 'geoip/cn.mrs',
+            path: './ruleset/cn-ip.mrs',
+            interval: 86400
+        }
+    };
 }
 
-export function createClashReferenceProxyGroups(proxies = [], fallbackTargets = []) {
-    const safeProxies = Array.isArray(proxies) ? proxies : [];
-    const allNames = unique(safeProxies.map(proxy => proxy?.name));
-    const hkAndTwNames = selectProxyNames(safeProxies, [
-        /\u9999\u6E2F|hong kong/i,
-        /\u53F0\u6E7E|\u53F0\u7063|taiwan/i
-    ]);
-    const taiwanNames = selectProxyNames(safeProxies, [
-        /\u53F0\u6E7E|\u53F0\u7063|taiwan/i
-    ]);
-    const steamRegionNames = selectProxyNames(safeProxies, [
-        /\u963F\u6839\u5EF7|argentina/i,
-        /\u4FC4\u7F57\u65AF|\u4FC4\u7F85\u65AF|russia/i,
-        /\u571F\u8033\u5176|turkey|t\u00fcrkiye/i,
-        /\u5370\u5EA6|india/i
-    ]);
-    const onedriveNames = selectProxyNames(safeProxies, [
-        /\u65E5\u672C|japan/i,
-        /\u65B0\u52A0\u5761|singapore/i,
-        /\u53F0\u6E7E|\u53F0\u7063|taiwan/i,
-        /\u7F8E\u56FD|\u7F8E\u570B|united states|usa/i,
-        /\u82F1\u56FD|\u82F1\u570B|united kingdom|uk/i,
-        /\u52A0\u62FF\u5927|canada/i,
-        /\u6FB3\u5927\u5229\u4E9A|\u6FB3\u5927\u5229\u4E9E|\u6FB3\u6D32|australia/i,
-        /\u6CD5\u56FD|\u6CD5\u570B|france/i,
-        /\u4E4C\u514B\u5170|\u70CF\u514B\u862D|ukraine/i
-    ]);
+function createDnsConfig() {
+    const domesticNameservers = [
+        'https://120.53.53.53/dns-query',
+        'https://223.5.5.5/dns-query'
+    ];
+    return {
+        enable: true,
+        ipv6: true,
+        'respect-rules': true,
+        'enhanced-mode': 'fake-ip',
+        nameserver: [...domesticNameservers],
+        'proxy-server-nameserver': [...domesticNameservers],
+        'nameserver-policy': {
+            'geosite:cn,private': [...domesticNameservers],
+            'geosite:geolocation-!cn': [
+                'https://dns.cloudflare.com/dns-query',
+                'https://dns.google/dns-query'
+            ]
+        }
+    };
+}
+
+export function createClashReferenceProxyGroups(proxies = []) {
+    const allNames = unique((Array.isArray(proxies) ? proxies : []).map(proxy => proxy?.name));
     const group = CLASH_REFERENCE_GROUP_NAMES;
+    const selectable = [...allNames, 'DIRECT', 'REJECT'];
 
     return [
-        { name: group.select, type: 'select', proxies: unique([...allNames, 'DIRECT']) },
-        { name: group.bilibili, type: 'select', proxies: unique(['DIRECT', ...hkAndTwNames, group.select]) },
-        { name: group.bahamut, type: 'select', proxies: unique([group.select, ...taiwanNames, 'DIRECT']) },
-        { name: group.steamDownload, type: 'select', proxies: unique(['DIRECT', group.select, ...steamRegionNames]) },
-        { name: group.steamStore, type: 'select', proxies: unique([group.select, ...steamRegionNames, 'DIRECT']) },
-        { name: group.cloudflare, type: 'select', proxies: [group.select, 'DIRECT'] },
-        { name: group.onedrive, type: 'select', proxies: unique([group.select, 'DIRECT', ...onedriveNames]) },
-        { name: group.academic, type: 'select', proxies: ['DIRECT', group.select] },
-        { name: group.domestic, type: 'select', proxies: ['DIRECT', group.select] },
-        { name: group.rejectAds, type: 'select', proxies: ['REJECT', 'DIRECT', group.select] },
-        { name: group.fallback, type: 'select', proxies: unique([...fallbackTargets, group.select, 'DIRECT']) }
+        {
+            name: group.select,
+            type: 'select',
+            proxies: unique([group.automatic, ...selectable])
+        },
+        {
+            name: group.automatic,
+            type: 'url-test',
+            proxies: allNames,
+            url: 'https://www.gstatic.com/generate_204',
+            interval: 300,
+            lazy: false
+        },
+        {
+            name: group.private,
+            type: 'select',
+            proxies: unique(['DIRECT', group.select, ...allNames, 'REJECT'])
+        },
+        {
+            name: group.domestic,
+            type: 'select',
+            proxies: unique(['DIRECT', group.select, ...allNames, 'REJECT'])
+        },
+        {
+            name: group.nonChina,
+            type: 'select',
+            proxies: unique([group.select, ...selectable])
+        },
+        {
+            name: group.fallback,
+            type: 'select',
+            proxies: unique([group.select, ...selectable])
+        }
     ];
-}
-
-function isTerminalRule(rule) {
-    return typeof rule === 'string' && /^(?:MATCH|FINAL),/i.test(rule.trim());
 }
 
 export function applyClashReferencePolicy(config = {}) {
     const proxies = Array.isArray(config.proxies) ? config.proxies : [];
     if (proxies.length === 0) return config;
 
+    const existingProviders = config['rule-providers'] && typeof config['rule-providers'] === 'object'
+        && !Array.isArray(config['rule-providers'])
+        ? config['rule-providers']
+        : {};
     const existingGroups = Array.isArray(config['proxy-groups'])
         ? config['proxy-groups'].filter(group => !REFERENCE_GROUP_NAME_SET.has(group?.name))
         : [];
-    const existingRules = Array.isArray(config.rules) ? config.rules : [];
-    const existingNonTerminalRules = existingRules.filter(rule => !isTerminalRule(rule));
-    const fallbackTargets = existingRules
-        .filter(isTerminalRule)
-        .map(rule => String(rule).split(',')[1]?.trim())
-        .filter(Boolean);
+    const existingRules = Array.isArray(config.rules)
+        ? config.rules.filter(rule => typeof rule !== 'string' || !/^(?:MATCH|FINAL),/i.test(rule.trim()))
+        : [];
 
     return {
         ...config,
+        port: 7890,
+        'socks-port': 7891,
+        'allow-lan': false,
+        mode: 'rule',
+        'log-level': 'info',
+        'geodata-mode': true,
+        'geo-auto-update': true,
+        'geodata-loader': 'standard',
+        'geo-update-interval': 24,
+        'geox-url': createGeoxUrls(),
+        'rule-providers': {
+            ...existingProviders,
+            ...createRuleProviders()
+        },
+        dns: createDnsConfig(),
         'proxy-groups': [
             ...existingGroups,
-            ...createClashReferenceProxyGroups(proxies, fallbackTargets)
+            ...createClashReferenceProxyGroups(proxies)
         ],
-        rules: [
-            ...existingNonTerminalRules,
+        rules: unique([
+            ...existingRules,
             ...CLASH_REFERENCE_RULES
-        ]
+        ])
     };
 }
