@@ -385,9 +385,9 @@ describe('handleTelegramWebhook', () => {
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
     expect(card.text).toContain('节点列表 (共 55 个)');
-    expect(card.text).toContain('N50');
+    expect(card.text).toContain('<b>- 🌍 trojan: N50</b>');
     expect(card.text).not.toContain('N51');
-    expect(card.text).toContain('5 个更多节点未显示');
+    expect(card.text).toContain('<b>- …等 (5 个更多节点未显示)</b>');
   });
 
   it('permanently stores an unsaved parsed subscription preview', async () => {
@@ -1967,8 +1967,8 @@ describe('handleTelegramWebhook', () => {
     expect(editBody.text).toContain('<b>使用进度:</b>');
     expect(editBody.text).toContain('<b>剩余可用:</b> 42.00 GB');
     expect(editBody.text).toContain('<blockquote expandable>🔌 <b>节点列表（共2个）</b>');
-    expect(editBody.text).toContain('1. [ANYTLS] 剩余流量：41.96 GB');
-    expect(editBody.text).toContain('2. [ANYTLS] 距离下次重置剩余：116 天');
+    expect(editBody.text).toContain('<b>1. [ANYTLS] 剩余流量：41.96 GB</b>');
+    expect(editBody.text).toContain('<b>2. [ANYTLS] 距离下次重置剩余：116 天</b>');
     expect(editBody.disable_web_page_preview).toBe(true);
 
     const buttons = editBody.reply_markup.inline_keyboard;
