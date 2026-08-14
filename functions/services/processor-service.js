@@ -11,7 +11,7 @@ import { fetchTransformTemplate } from '../modules/subscription/transform-templa
 import { resolveRuleTemplateSource } from '../modules/rule-template-handler.js';
 import { base64EncodeUtf8 } from '../modules/utils.js';
 import yaml from 'js-yaml';
-import { urlsToClashProxies } from '../utils/url-to-clash.js';
+import { applyClashExportBase, urlsToClashProxies } from '../utils/url-to-clash.js';
 
 function getTemplateExtension(templateUrl) {
     const raw = typeof templateUrl === 'string' ? templateUrl.trim() : '';
@@ -81,10 +81,10 @@ export function renderClashYamlProfileTemplate(templateText, nodeList, options =
     const proxies = urlsToClashProxies(nodeUrls, options).map(stripInternalProxyFields);
     deduplicateProxyNames(proxies);
 
-    return yaml.dump({
+    return yaml.dump(applyClashExportBase({
         ...config,
         proxies
-    }, {
+    }), {
         indent: 2,
         lineWidth: -1,
         noRefs: true,

@@ -3,6 +3,29 @@ import yaml from 'js-yaml';
 import { generateBuiltinClashConfig, generateProxiesOnly } from '../../functions/modules/subscription/builtin-clash-generator.js';
 
 describe('Clash 内置生成器', () => {
+    it('完整导出应使用统一的参考 Clash 基础配置', () => {
+        const node = 'trojan://password@1.2.3.4:443#HK-Test';
+        const config = yaml.load(generateBuiltinClashConfig(node));
+
+        expect(config).toMatchObject({
+            port: 7890,
+            'socks-port': 7891,
+            'allow-lan': false,
+            mode: 'Rule',
+            'log-level': 'info',
+            'external-controller': '127.0.0.1:9090',
+            'unified-delay': true
+        });
+        expect(config).not.toHaveProperty('mixed-port');
+        expect(config.hosts).toMatchObject({
+            'time.facebook.com': '17.253.84.125',
+            'time.android.com': '17.253.84.125'
+        });
+        expect(config.dns).toMatchObject({ enable: true, 'use-hosts': true });
+        expect(config.dns['default-nameserver']).toContain('119.29.29.29');
+        expect(config.dns.nameserver).toContain('tls://dot.pub');
+    });
+
     it('应清理节点列表中的控制字符', () => {
         const nodeWithControl = 'ss://YWVzLTEyOC1nY206cGFzc3dvcmQ=@1.2.3.4:8388#Test\x00SS';
         const result = generateBuiltinClashConfig(nodeWithControl);

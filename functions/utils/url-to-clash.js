@@ -1361,7 +1361,7 @@ export function urlsToClashProxies(urls, options = {}) {
         .filter(proxy => proxy !== null);
 }
 
-function createClashDnsConfig() {
+export function createClashDnsConfig() {
     return {
         enable: true,
         'use-hosts': true,
@@ -1388,10 +1388,29 @@ function createClashDnsConfig() {
     };
 }
 
-function serializeClashConfig(proxies) {
-    const cleanProxies = proxies.map(({ metadata, ...proxy }) => proxy);
-    const mainGroup = '\u{1F530} 选择节点';
-    const config = {
+export function applyClashExportBase(config = {}) {
+    const {
+        port: _port,
+        'socks-port': _socksPort,
+        'mixed-port': _mixedPort,
+        'allow-lan': _allowLan,
+        mode: _mode,
+        'log-level': _logLevel,
+        'external-controller': _externalController,
+        'unified-delay': _unifiedDelay,
+        hosts: existingHosts,
+        dns: existingDns,
+        ...content
+    } = config && typeof config === 'object' && !Array.isArray(config) ? config : {};
+    const {
+        enable: _dnsEnable,
+        'use-hosts': _dnsUseHosts,
+        'default-nameserver': _defaultNameserver,
+        nameserver: _nameserver,
+        ...dnsExtensions
+    } = existingDns && typeof existingDns === 'object' && !Array.isArray(existingDns) ? existingDns : {};
+
+    return {
         port: 7890,
         'socks-port': 7891,
         'allow-lan': false,
@@ -1401,9 +1420,31 @@ function serializeClashConfig(proxies) {
         'unified-delay': true,
         hosts: {
             'time.facebook.com': '17.253.84.125',
-            'time.android.com': '17.253.84.125'
+            'time.android.com': '17.253.84.125',
+            ...(existingHosts && typeof existingHosts === 'object' && !Array.isArray(existingHosts) ? existingHosts : {})
         },
-        dns: createClashDnsConfig(),
+        dns: {
+            ...createClashDnsConfig(),
+            ...dnsExtensions
+        },
+        ...content
+    };
+}
+
+export function serializeClashConfig(config, dumpOptions = {}) {
+    return yaml.dump(applyClashExportBase(config), {
+        indent: 2,
+        lineWidth: -1,
+        noRefs: true,
+        ...dumpOptions
+    });
+}
+
+function createStandaloneClashConfig(proxies) {
+    const cleanProxies = proxies.map(({ metadata, ...proxy }) => proxy);
+    const mainGroup = '\u{1F530} 选择节点';
+
+    return {
         proxies: cleanProxies,
         'proxy-groups': [{
             name: mainGroup,
@@ -1412,12 +1453,6 @@ function serializeClashConfig(proxies) {
         }],
         rules: ['MATCH,' + mainGroup]
     };
-
-    return yaml.dump(config, {
-        indent: 2,
-        lineWidth: -1,
-        noRefs: true
-    });
 }
 
 /**
@@ -1433,5 +1468,5 @@ export function generateClashConfig(urls, options = {}) {
         return '';
     }
 
-    return serializeClashConfig(proxies);
+    return serializeClashConfig(createStandaloneClashConfig(proxies));
 }

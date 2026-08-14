@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import yaml from 'js-yaml';
 import { ProcessorService, isClashYamlProfileTemplate, isIniTemplateSource } from '../../functions/services/processor-service.js';
 
 const NODE_LIST = 'trojan://pass@1.1.1.1:443#HK-01';
@@ -105,6 +106,18 @@ rules:
         expect(result.content).toContain('proxies:');
         expect(result.content).toContain('name: 🇭🇰 HK-01');
         expect(result.content).not.toContain('metadata:');
+
+        const exportedConfig = yaml.load(result.content);
+        expect(exportedConfig).toMatchObject({
+            port: 7890,
+            'socks-port': 7891,
+            'allow-lan': false,
+            mode: 'Rule',
+            'external-controller': '127.0.0.1:9090',
+            'unified-delay': true
+        });
+        expect(exportedConfig).not.toHaveProperty('mixed-port');
+        expect(exportedConfig.dns).toMatchObject({ enable: true, 'use-hosts': true });
     });
 
     it('detects Clash YAML profile templates by structure instead of treating them as ini templates', () => {

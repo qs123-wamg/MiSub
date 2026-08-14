@@ -45,6 +45,16 @@ MATCH,节点选择
         });
 
         const parsed = yaml.load(rendered);
+        expect(parsed).toMatchObject({
+            port: 7890,
+            'socks-port': 7891,
+            'allow-lan': false,
+            mode: 'Rule',
+            'external-controller': '127.0.0.1:9090',
+            'unified-delay': true
+        });
+        expect(parsed).not.toHaveProperty('mixed-port');
+        expect(parsed.dns).toMatchObject({ enable: true, 'use-hosts': true });
         expect(parsed['proxy-groups'][0].name).toBe('节点选择');
         expect(parsed.rules).toContain('MATCH,节点选择');
         expect(parsed.profile['subscription-url']).toBe('https://example.com/sub');

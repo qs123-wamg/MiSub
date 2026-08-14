@@ -4,7 +4,7 @@
  * 支持 dialer-proxy、reality-opts 等特殊参数
  */
 
-import { urlsToClashProxies } from '../../utils/url-to-clash.js';
+import { serializeClashConfig, urlsToClashProxies } from '../../utils/url-to-clash.js';
 import { getUniqueName } from './name-utils.js';
 import { isMetaCore } from './user-agent-utils.js';
 import {
@@ -162,7 +162,11 @@ export function generateBuiltinClashConfig(nodeList, options = {}) {
     deduplicateNames(proxies);
 
     if (proxies.length === 0) {
-        return '# No valid proxies found\nproxies: []\n';
+        return serializeClashConfig({
+            proxies: [],
+            'proxy-groups': [],
+            rules: []
+        });
     }
 
     // 生成 YAML
@@ -195,27 +199,7 @@ export function generateBuiltinClashConfig(nodeList, options = {}) {
             proxyGroups = relayConfig.proxyGroups;
         }
 
-        // 基础配置
         const config = {
-            'mixed-port': 7890,
-            'allow-lan': true,
-            'mode': 'rule',
-            'log-level': 'info',
-            'external-controller': ':9090',
-
-            'dns': {
-                'enable': true,
-                'listen': '0.0.0.0:1053',
-                'default-nameserver': ['223.5.5.5', '1.1.1.1'],
-                'enhanced-mode': 'fake-ip',
-                'fake-ip-range': '198.18.0.1/16',
-                'fake-ip-filter': ['*.lan', '*.localhost'],
-                'nameserver': [
-                    'https://dns.alidns.com/dns-query',
-                    'https://doh.pub/dns-query'
-                ]
-            },
-
             'proxies': publicProxies,
             'profile': {
                 'store-selected': true,
@@ -227,10 +211,7 @@ export function generateBuiltinClashConfig(nodeList, options = {}) {
             'rules': clashRules
         };
 
-        let yamlStr = yaml.dump(config, {
-            indent: 2,
-            lineWidth: -1,
-            noRefs: true,
+        const yamlStr = serializeClashConfig(config, {
             quotingType: '"',
             forceQuotes: false
         });
@@ -242,10 +223,15 @@ export function generateBuiltinClashConfig(nodeList, options = {}) {
         // Fallback: 至少返回包含节点的有效 YAML 结构，而不是传回会导致 Clash 报错的 Base64
         const fallbackProxies = Array.isArray(proxies) ? stripInternalProxyFields(proxies) : [];
         const selectGroup = (ruleLevel || '').toUpperCase() === 'RELAY' ? DEFAULT_RELAY_GROUP : DEFAULT_SELECT_GROUP;
-        const fallbackYaml = `proxies:\n${fallbackProxies.map(p => `  - ${JSON.stringify(p)}`).join('\n')}\n` +
-                             `proxy-groups:\n  - name: ${selectGroup}\n    type: select\n    proxies: ${JSON.stringify(fallbackProxies.map(p => p.name))}\n` +
-                             `rules:\n  - MATCH,${selectGroup}\n`;
-        return fallbackYaml;
+        return serializeClashConfig({
+            proxies: fallbackProxies,
+            'proxy-groups': [{
+                name: selectGroup,
+                type: 'select',
+                proxies: fallbackProxies.map(proxy => proxy.name)
+            }],
+            rules: [`MATCH,${selectGroup}`]
+        });
     }
 }
 

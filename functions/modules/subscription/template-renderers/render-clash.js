@@ -1,5 +1,6 @@
 import yaml from 'js-yaml';
 import { clashFix } from '../../../utils/format-utils.js';
+import { applyClashExportBase } from '../../../utils/url-to-clash.js';
 import { normalizeUnifiedTemplateModel } from '../template-model.js';
 
 function mapGroupType(type) {
@@ -158,24 +159,7 @@ export function renderClashFromTemplateModel(model) {
         };
     });
 
-    const config = {
-        'mixed-port': 7890,
-        'allow-lan': true,
-        'mode': 'rule',
-        'log-level': 'info',
-        'external-controller': ':9090',
-        'dns': {
-            'enable': true,
-            'listen': '0.0.0.0:1053',
-            'default-nameserver': ['223.5.5.5', '1.1.1.1'],
-            'enhanced-mode': 'fake-ip',
-            'fake-ip-range': '198.18.0.1/16',
-            'fake-ip-filter': ['*.lan', '*.localhost'],
-            'nameserver': [
-                'https://dns.alidns.com/dns-query',
-                'https://doh.pub/dns-query'
-            ]
-        },
+    const config = applyClashExportBase({
         'proxies': normalizedModel.proxies,
         'proxy-groups': normalizedModel.groups
             .filter(group =>
@@ -202,7 +186,7 @@ export function renderClashFromTemplateModel(model) {
             'store-selected': true,
             'subscription-url': normalizedModel.settings.managedConfigUrl || ''
         }
-    };
+    });
 
     let yamlStr = yaml.dump(config, {
         indent: 2,
