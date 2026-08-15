@@ -67,6 +67,44 @@ describe('subscription protective node cache', () => {
         expect(cache.nodeCount).toBe(1);
     });
 
+    it('保留 Clash 订阅自带规则到单机场缓存和本次生成上下文', async () => {
+        const storage = createMemoryStorage();
+        vi.stubGlobal('fetch', vi.fn(async () => new Response(`
+proxies:
+  - name: Source-Node
+    type: trojan
+    server: example.com
+    port: 443
+    password: pass
+proxy-groups:
+  - name: Source Select
+    type: select
+    proxies: [Source-Node, DIRECT]
+rules:
+  - DOMAIN-SUFFIX,example.com,DIRECT
+  - MATCH,Source Select
+`, { status: 200 })));
+
+        const context = { storage };
+        const result = await generateCombinedNodeList(
+            context,
+            { enableAccessLog: false, enableFlagEmoji: false },
+            'ClashMeta',
+            [{ id: 'sub-rules', name: '机场规则', url: 'https://example.com/rules', enabled: true, enableNodeCache: true }],
+            '',
+            { enableSubscriptions: false },
+            false
+        );
+
+        const cache = await storage.get(buildSubscriptionNodeCacheKey({ id: 'sub-rules' }));
+        expect(result.trim()).toMatch(/^trojan:\/\//);
+        expect(context.sourceClashConfig.rules).toEqual([
+            'DOMAIN-SUFFIX,example.com,DIRECT',
+            'MATCH,Source Select'
+        ]);
+        expect(cache.sourceClashConfig).toEqual(context.sourceClashConfig);
+    });
+
     it('enableNodeCache 开启且拉取失败时，使用该机场上次成功缓存', async () => {
         const storage = createMemoryStorage({
             [buildSubscriptionNodeCacheKey({ id: 'sub-a', url: 'https://example.com/sub' })]: {

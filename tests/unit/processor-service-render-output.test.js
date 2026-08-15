@@ -67,6 +67,38 @@ MATCH,MyGroup
         expect(fetch).not.toHaveBeenCalled();
     });
 
+    it('prefers upstream Clash rules over the fallback rule template', async () => {
+        const sourceClashConfig = {
+            rules: ['DOMAIN-SUFFIX,example.com,DIRECT', 'MATCH,Source Select'],
+            'rule-providers': {},
+            'proxy-groups': [{
+                name: 'Source Select',
+                type: 'select',
+                proxies: ['Original Node', 'DIRECT']
+            }]
+        };
+        const result = await ProcessorService.renderOutput({
+            targetFormat: 'clash',
+            combinedNodeList: NODE_LIST,
+            subName: 'Demo',
+            config: {},
+            builtinOptions: { ruleLevel: 'base', addFlagEmoji: false },
+            sourceClashConfig,
+            managedConfigUrl: 'https://example.com/sub',
+            storageAdapter
+        });
+
+        const parsed = yaml.load(result.content);
+        expect(parsed.rules).toEqual(sourceClashConfig.rules);
+        expect(parsed.rules).not.toEqual(expect.arrayContaining(CLASH_REFERENCE_RULES));
+        expect(parsed['rule-providers']).toBeUndefined();
+        expect(parsed['proxy-groups']).toEqual([{
+            name: 'Source Select',
+            type: 'select',
+            proxies: ['HK-01', 'DIRECT']
+        }]);
+    });
+
     it('renders remote Clash YAML profile templates by injecting MiSub nodes locally', async () => {
         vi.stubGlobal('fetch', vi.fn(async () => new Response(`
 mode: rule

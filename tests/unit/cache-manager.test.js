@@ -17,7 +17,8 @@ describe('resolveNodeListWithCache', () => {
                 nodes: 'trojan://password@1.2.3.4:443#HK-01',
                 timestamp: Date.now(),
                 nodeCount: 1,
-                sources: ['airport']
+                sources: ['airport'],
+                sourceClashConfig: { rules: ['MATCH,Source Select'] }
             }),
             cacheKey: 'node_cache_token_test',
             forceRefresh: false,
@@ -31,6 +32,7 @@ describe('resolveNodeListWithCache', () => {
         expect(result.cacheHeaders['X-Node-Count']).toBe('1');
         expect(refreshNodes).not.toHaveBeenCalled();
         expect(context.generationStats.totalNodes).toBe(1);
+        expect(context.sourceClashConfig.rules).toEqual(['MATCH,Source Select']);
     });
 
     it('refreshes synchronously when a fresh cache contains zero nodes', async () => {

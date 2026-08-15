@@ -31,6 +31,7 @@ import { extractValidNodes, parseNodeList } from '../utils/node-parser.js';
 import { getRegionEmoji } from '../utils/geo-utils.js';
 import { buildSubscriptionNodeCacheKey, isInlineSubscription, isRealProxyNode, isRemoteSubscription, isSubscriptionEntry, parseSubscriptionUserInfoHeader } from '../../services/subscription-service.js';
 import { generateClashConfig, urlToClashProxy } from '../../utils/url-to-clash.js';
+import { extractClashSourceConfig, normalizeClashSourceConfig } from '../subscription/clash-source-config.js';
 const TELEGRAM_SUBSCRIPTION_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const TELEGRAM_SUBSCRIPTION_FALLBACK_USER_AGENT = 'clash-verge/v2.4.3';
 const TELEGRAM_SUBSCRIPTION_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -639,6 +640,7 @@ async function fetchSubscriptionPreview(url, options = {}) {
             filename,
             name: getSubscriptionDisplayName(filename, currentUrl),
             nodeUrls,
+            sourceClashConfig: extractClashSourceConfig(content),
             userInfo: parseSubscriptionUserInfoHeader(response.headers.get('subscription-userinfo')),
             userAgent,
             usedFallbackUserAgent,
@@ -812,6 +814,7 @@ function createPreviewSession(preview, userId, sessionId = generateId()) {
         filename: preview.filename,
         name: preview.name,
         nodeUrls: nodes.map(node => node.url),
+        sourceClashConfig: normalizeClashSourceConfig(preview.sourceClashConfig),
         userInfo: preview.userInfo || null,
         userAgent: preview.userAgent || TELEGRAM_SUBSCRIPTION_USER_AGENT,
         usedFallbackUserAgent: preview.usedFallbackUserAgent === true,
@@ -829,6 +832,7 @@ function createInlinePreviewSession(subscription, userId, filename = '') {
         filename: String(filename || '').trim() || `${subscription.name}.txt`,
         name: subscription.name,
         nodeUrls: normalizeStoredNodeUrls(subscription.nodeUrls),
+        sourceClashConfig: normalizeClashSourceConfig(subscription.sourceClashConfig),
         userInfo: subscription.userInfo || null,
         fetchedAt: Date.parse(subscription.lastUpdate || '') || Date.now(),
         savedSubscriptionId: subscription.id
@@ -1109,7 +1113,7 @@ function normalizeStoredNodeUrls(value) {
     return [...new Set(candidates.map(item => String(item || '').trim()).filter(isRealProxyNode))];
 }
 
-function createInlineSubscription(nodeUrls, name, userId) {
+function createInlineSubscription(nodeUrls, name, userId, sourceClashConfig = null) {
     const nodes = normalizeStoredNodeUrls(nodeUrls);
     const id = generateId();
     const now = new Date().toISOString();
@@ -1119,6 +1123,7 @@ function createInlineSubscription(nodeUrls, name, userId) {
         name: String(name || '').trim() || 'Telegram 多节点订阅',
         url: `inline:${id}`,
         nodeUrls: nodes,
+        sourceClashConfig: normalizeClashSourceConfig(sourceClashConfig),
         nodeCount: nodes.length,
         enabled: true,
         source: 'telegram',
@@ -1178,6 +1183,7 @@ async function renderStoredSubscriptionDetail(chatId, messageId, subscription, i
         filename: subscription.name || 'subscription',
         name: subscription.name || '未命名订阅',
         nodeUrls,
+        sourceClashConfig: normalizeClashSourceConfig(subscription.sourceClashConfig),
         storedNodeCount: Math.max(nodeUrls.length, Number(subscription.nodeCount || 0)),
         userInfo: subscription.userInfo || null,
         fetchedAt: Date.parse(subscription.lastUpdate || '') || Date.now(),
@@ -1210,6 +1216,7 @@ async function refreshStoredSubscriptionDetail(chatId, messageId, subscription, 
     subscription.nodeUrls = nodes;
     subscription.nodeCount = nodes.length;
     subscription.userInfo = preview.userInfo || null;
+    subscription.sourceClashConfig = normalizeClashSourceConfig(preview.sourceClashConfig);
     if (preview.userAgent && (!subscription.customUserAgent || preview.usedFallbackUserAgent)) {
         subscription.customUserAgent = preview.userAgent;
     }
@@ -1362,7 +1369,7 @@ async function savePreviewSubscription(session, userId, env, cache) {
                 created_at: now
             }
             : isInline
-            ? createInlineSubscription(session.nodeUrls, session.name, userId)
+            ? createInlineSubscription(session.nodeUrls, session.name, userId, session.sourceClashConfig)
             : {
                 id: generateId(),
                 name: session.name,
@@ -1372,6 +1379,7 @@ async function savePreviewSubscription(session, userId, env, cache) {
                 telegram_user_id: userId,
                 customUserAgent: session.userAgent || TELEGRAM_SUBSCRIPTION_USER_AGENT,
                 nodeUrls: normalizeStoredNodeUrls(session.nodeUrls),
+                sourceClashConfig: normalizeClashSourceConfig(session.sourceClashConfig),
                 nodeCount: session.nodeUrls.length,
                 userInfo: session.userInfo || null,
                 lastUpdate: now,
@@ -1387,6 +1395,7 @@ async function savePreviewSubscription(session, userId, env, cache) {
             updateStoredSubscriptionName(subscription, session.name);
             subscription.nodeCount = session.nodeUrls.length;
             subscription.userInfo = session.userInfo || null;
+            subscription.sourceClashConfig = normalizeClashSourceConfig(session.sourceClashConfig);
             subscription.lastUpdate = now;
             if (isInline) {
                 subscription.type = 'inline';
@@ -3198,7 +3207,8 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
             const inlineSubscription = createInlineSubscription(
                 nodeUrls,
                 options.inlineName || 'Telegram 多节点订阅',
-                userId
+                userId,
+                options.sourceClashConfig
             );
             const signature = inlineSubscription.nodeUrls.join('\n');
             existingInlineSubscription = allSubscriptions.find(item => (
@@ -3206,6 +3216,11 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
                 && normalizeStoredNodeUrls(item.nodeUrls).join('\n') === signature
             ));
             if (existingInlineSubscription) {
+                const sourceClashConfig = normalizeClashSourceConfig(options.sourceClashConfig);
+                if (sourceClashConfig && !normalizeClashSourceConfig(existingInlineSubscription.sourceClashConfig)) {
+                    existingInlineSubscription.sourceClashConfig = sourceClashConfig;
+                    await storageAdapter.putAllSubscriptions(allSubscriptions);
+                }
                 ignoredUrls.push(...inlineSubscription.nodeUrls);
             } else {
                 allSubscriptions.unshift(inlineSubscription);
@@ -3387,6 +3402,7 @@ async function handleTelegramDocumentInput(chatId, document, userId, env, reques
             { requestCache: cache }
         );
         const text = await fetchTelegramDocumentText(document, env, cache);
+        const sourceClashConfig = extractClashSourceConfig(text);
         const input = prepareTelegramDocumentInput(text);
         return handleNodeInput(chatId, input, userId, env, cache, {
             rateLimitChecked: true,
@@ -3395,6 +3411,7 @@ async function handleTelegramDocumentInput(chatId, document, userId, env, reques
             failureDiagnosticInput: text,
             inlineName: getInlineSubscriptionName(filename),
             inlineFilename: filename,
+            sourceClashConfig,
             showSubscriptionPreviewCard: true
         });
     } catch (error) {
@@ -3716,7 +3733,10 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                 await sendTelegramDocument(chatId, `${session.name}.txt`, encoded, env, `${session.name} · Base64`);
             } else if (action === 'yaml') {
                 await answerCallbackQuery(callbackQuery.id, '正在导出 YAML...', env);
-                const yaml = generateClashConfig(session.nodeUrls, { addFlagEmoji: true });
+                const yaml = generateClashConfig(session.nodeUrls, {
+                    addFlagEmoji: true,
+                    sourceClashConfig: session.sourceClashConfig
+                });
                 await sendTelegramDocument(chatId, `${session.name}.yaml`, yaml, env, `${session.name} · Clash YAML`);
             } else if (action === 'save') {
                 await answerCallbackQuery(callbackQuery.id, '正在保存订阅...', env);

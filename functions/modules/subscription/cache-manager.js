@@ -28,6 +28,11 @@ function populateCachedStats(context, cachedNodeCount, targetMisubsCount) {
     };
 }
 
+function populateCachedSourceConfig(context, cachedData) {
+    if (!context) return;
+    context.sourceClashConfig = cachedData?.sourceClashConfig || null;
+}
+
 export async function resolveNodeListWithCache({
     storageAdapter,
     cacheKey,
@@ -49,6 +54,7 @@ export async function resolveNodeListWithCache({
         combinedNodeList = cachedData.nodes;
         cacheHeaders = createCacheHeaders('HIT', cachedNodeCount);
         populateCachedStats(context, cachedNodeCount, targetMisubsCount);
+        populateCachedSourceConfig(context, cachedData);
     } else if ((cacheStatus === 'stale' || cacheStatus === 'expired') && canUseCachedData) {
         const cachedNodeCount = countCachedNodes(cachedData);
         combinedNodeList = cachedData.nodes;
@@ -61,6 +67,7 @@ export async function resolveNodeListWithCache({
         }
 
         populateCachedStats(context, cachedNodeCount, targetMisubsCount);
+        populateCachedSourceConfig(context, cachedData);
     } else {
         combinedNodeList = await refreshNodes(false);
         cacheHeaders = createCacheHeaders('MISS', combinedNodeList.split('\n').filter(line => line.trim()).length);

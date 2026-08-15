@@ -11,6 +11,7 @@ import { prependNodeName, addFlagEmoji, removeFlagEmoji, fixNodeUrlEncoding, san
 import { runOperatorChain } from '../utils/operator-runner.js';
 import { createTimeoutFetch } from '../modules/utils.js';
 import { assertPublicNetworkUrl } from '../modules/security-utils.js';
+import { extractClashSourceConfig, mergeClashSourceConfigs, normalizeClashSourceConfig } from '../modules/subscription/clash-source-config.js';
 
 /**
  * 订阅获取配置常量
@@ -103,7 +104,7 @@ async function readSubscriptionNodeCache(storage, sub) {
     }
 }
 
-async function writeSubscriptionNodeCache(storage, sub, nodes) {
+async function writeSubscriptionNodeCache(storage, sub, nodes, sourceClashConfig = null) {
     if (!storage?.put) return false;
     const realNodes = Array.isArray(nodes) ? nodes.filter(isRealProxyNode) : [];
     if (realNodes.length === 0) return false;
@@ -115,7 +116,8 @@ async function writeSubscriptionNodeCache(storage, sub, nodes) {
             updatedAt: new Date().toISOString(),
             sourceId: sub?.id || null,
             sourceName: sub?.name || '',
-            sourceUrl: sub?.url || ''
+            sourceUrl: sub?.url || '',
+            sourceClashConfig: normalizeClashSourceConfig(sourceClashConfig)
         });
         return true;
     } catch (error) {
@@ -436,10 +438,13 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
             recordCurrentRequestRuntimeInfo(context, sub, runtimeInfo);
             scheduleSubscriptionRuntimeInfoUpdate(context, storage, sub, runtimeInfo);
         };
-        const readCachedNodes = async () => {
-            if (!cacheEnabled) return [];
+        const readCachedResult = async () => {
+            if (!cacheEnabled) return { nodeList: '', sourceClashConfig: null };
             const cached = await readSubscriptionNodeCache(storage, sub);
-            return cached?.nodes || [];
+            return {
+                nodeList: (cached?.nodes || []).join('\n'),
+                sourceClashConfig: normalizeClashSourceConfig(cached?.sourceClashConfig)
+            };
         };
 
         try {
@@ -481,12 +486,13 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
 
             if (!response.ok) {
                 recordEmptyRuntimeInfo();
-                return (await readCachedNodes()).join('\n');
+                return readCachedResult();
             }
             const buffer = await response.arrayBuffer();
             let text = new TextDecoder('utf-8').decode(buffer);
 
             text = await decodeBase64Content(text);
+            let sourceClashConfig = extractClashSourceConfig(text);
 
             // 使用统一的 node-parser 解析，确保与预览一致的过滤规则 (UUID校验, Hysteria1过滤, SS加密校验等)
             const parsedObjects = parseNodeList(text);
@@ -497,6 +503,7 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
                 const fallbackNodes = parseNodeList(fallbackText);
                 if (fallbackNodes.length > 0) {
                     fallbackParsedObjects = fallbackNodes;
+                    sourceClashConfig = extractClashSourceConfig(fallbackText) || sourceClashConfig;
                 }
             }
 
@@ -507,14 +514,14 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
 
             const realNodes = validNodes.filter(isRealProxyNode);
             if (cacheEnabled && realNodes.length === 0) {
-                return (await readCachedNodes()).join('\n');
+                return readCachedResult();
             }
             if (!cacheEnabled && realNodes.length === 0) {
                 recordEmptyRuntimeInfo();
             }
 
             if (cacheEnabled) {
-                await writeSubscriptionNodeCache(storage, sub, realNodes);
+                await writeSubscriptionNodeCache(storage, sub, realNodes, sourceClashConfig);
             }
 
             if (realNodes.length > 0) {
@@ -532,12 +539,13 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
             const shouldPrependSubscriptions = profilePrefixSettings?.enableSubscriptions ?? true;
             const shouldAddSubPrefix = shouldPrependSubscriptions && !skipPrefixDueToRenaming;
 
-            return (shouldAddSubPrefix && sub.name)
+            const nodeList = (shouldAddSubPrefix && sub.name)
                 ? validNodes.map(node => prependNodeName(node, sub.name)).join('\n')
                 : validNodes.join('\n');
+            return { nodeList, sourceClashConfig };
         } catch (e) {
             recordEmptyRuntimeInfo();
-            return (await readCachedNodes()).join('\n');
+            return readCachedResult();
         }
     };
 
@@ -549,15 +557,26 @@ const prependGroupName = profilePrefixSettings?.prependGroupName ?? false;
 
         const shouldPrependSubscriptions = profilePrefixSettings?.enableSubscriptions ?? true;
         const shouldAddSubPrefix = shouldPrependSubscriptions && !skipPrefixDueToRenaming;
-        return (shouldAddSubPrefix && sub.name)
+        const nodeList = (shouldAddSubPrefix && sub.name)
             ? validNodes.map(node => prependNodeName(node, sub.name)).join('\n')
             : validNodes.join('\n');
+        return {
+            nodeList,
+            sourceClashConfig: normalizeClashSourceConfig(sub.sourceClashConfig)
+        };
     };
 
     // 使用并发控制器限制同时请求数量，避免网络拥塞
     const subPromises = httpSubs.map(sub => limiter(() => fetchSingleSubscription(sub)));
-    const processedSubContents = await Promise.all(subPromises);
-    const processedInlineContents = await Promise.all(inlineSubs.map(processInlineSubscription));
+    const processedSubResults = await Promise.all(subPromises);
+    const processedInlineResults = await Promise.all(inlineSubs.map(processInlineSubscription));
+    const sourceClashConfig = mergeClashSourceConfigs(
+        [...processedSubResults, ...processedInlineResults].map(result => result?.sourceClashConfig)
+    );
+    const processedSubContents = processedSubResults.map(result => result?.nodeList || '');
+    const processedInlineContents = processedInlineResults.map(result => result?.nodeList || '');
+
+    if (context) context.sourceClashConfig = sourceClashConfig;
     
     // --- 阶段 1: 原始数据汇聚 (Raw Data Aggregation) ---
     const rawCombinedLines = (processedManualNodes + '\n' + processedSubContents.join('\n') + '\n' + processedInlineContents.join('\n'))

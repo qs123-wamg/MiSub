@@ -1,4 +1,5 @@
 import { CLASH_REFERENCE_RULES } from './clash-reference-rules.js';
+import { normalizeClashSourceConfig } from './clash-source-config.js';
 
 export const CLASH_REFERENCE_GROUP_NAMES = Object.freeze({
     select: '\u{1F680} \u8282\u70B9\u9009\u62E9',
@@ -24,6 +25,44 @@ const REFERENCE_GROUP_NAME_SET = new Set([
 ]);
 function unique(items) {
     return [...new Set(items.filter(Boolean))];
+}
+
+const CLASH_BUILTIN_PROXY_NAMES = new Set([
+    'DIRECT',
+    'REJECT',
+    'REJECT-DROP',
+    'PASS',
+    'COMPATIBLE',
+    'GLOBAL'
+]);
+
+function adaptSourceProxyGroups(groups, proxies) {
+    const sourceGroups = Array.isArray(groups) ? groups : [];
+    const proxyNames = unique(proxies.map(proxy => proxy?.name));
+    const groupNames = new Set(sourceGroups.map(group => group?.name).filter(Boolean));
+
+    return sourceGroups.map(group => {
+        const members = Array.isArray(group.proxies) ? group.proxies : null;
+        if (!members) return { ...group };
+
+        let insertedCurrentProxies = false;
+        const nextMembers = [];
+        for (const member of members) {
+            if (groupNames.has(member) || CLASH_BUILTIN_PROXY_NAMES.has(member)) {
+                nextMembers.push(member);
+                continue;
+            }
+            if (!insertedCurrentProxies) {
+                nextMembers.push(...proxyNames);
+                insertedCurrentProxies = true;
+            }
+        }
+
+        return {
+            ...group,
+            proxies: unique(nextMembers)
+        };
+    });
 }
 
 function createGeoxUrls() {
@@ -145,9 +184,34 @@ export function createClashReferenceProxyGroups(proxies = []) {
     ];
 }
 
-export function applyClashReferencePolicy(config = {}) {
+export function applyClashReferencePolicy(config = {}, options = {}) {
     const proxies = Array.isArray(config.proxies) ? config.proxies : [];
     if (proxies.length === 0) return config;
+
+    const sourceConfig = normalizeClashSourceConfig(options.sourceClashConfig);
+    if (sourceConfig) {
+        const sourceGroups = adaptSourceProxyGroups(sourceConfig['proxy-groups'], proxies);
+        const existingGroups = Array.isArray(config['proxy-groups']) ? config['proxy-groups'] : [];
+        const sourceProviders = sourceConfig['rule-providers'];
+
+        return {
+            ...config,
+            port: 7890,
+            'socks-port': 7891,
+            'allow-lan': false,
+            mode: 'rule',
+            'log-level': 'info',
+            'geodata-mode': true,
+            'geo-auto-update': true,
+            'geodata-loader': 'standard',
+            'geo-update-interval': 24,
+            'geox-url': createGeoxUrls(),
+            'rule-providers': Object.keys(sourceProviders).length > 0 ? sourceProviders : undefined,
+            dns: createDnsConfig(),
+            'proxy-groups': sourceGroups.length > 0 ? sourceGroups : existingGroups,
+            rules: sourceConfig.rules
+        };
+    }
 
     const existingProviders = config['rule-providers'] && typeof config['rule-providers'] === 'object'
         && !Array.isArray(config['rule-providers'])

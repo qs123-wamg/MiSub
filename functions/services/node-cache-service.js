@@ -82,7 +82,7 @@ export async function getCache(storageAdapter, cacheKey) {
  * @param {string[]} sources - 来源订阅名称列表
  * @returns {Promise<boolean>}
  */
-export async function setCache(storageAdapter, cacheKey, nodes, sources = []) {
+export async function setCache(storageAdapter, cacheKey, nodes, sources = [], metadata = {}) {
     try {
         const nodeCount = nodes.split('\n').filter(line => line.trim()).length;
         if (nodeCount === 0) {
@@ -98,7 +98,8 @@ export async function setCache(storageAdapter, cacheKey, nodes, sources = []) {
             nodes,
             timestamp: Date.now(),
             nodeCount,
-            sources
+            sources,
+            ...(metadata && typeof metadata === 'object' ? metadata : {})
         };
 
         // 计算 TTL（秒），使用 MAX_AGE 作为过期时间

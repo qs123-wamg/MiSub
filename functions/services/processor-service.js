@@ -139,7 +139,8 @@ export class ProcessorService {
             templateSource = { kind: 'none', value: '' },
             managedConfigUrl,
             storageAdapter,
-            userInfoHeader
+            userInfoHeader,
+            sourceClashConfig = null
         } = options || {};
 
         // Check for Base64 (simplest case)
@@ -228,6 +229,21 @@ export class ProcessorService {
         if (contentType === 'text/plain; charset=utf-8') {
              if (targetFormat === 'clash' || targetFormat === 'egern') contentType = 'application/x-yaml; charset=utf-8';
              else if (targetFormat === 'singbox' || targetFormat === 'sing-box') contentType = 'application/json; charset=utf-8';
+        }
+
+        if (targetFormat === 'clash' && sourceClashConfig && finalContent) {
+            try {
+                const parsed = yaml.load(finalContent);
+                finalContent = yaml.dump(applyClashExportBase(parsed, { sourceClashConfig }), {
+                    indent: 2,
+                    lineWidth: -1,
+                    noRefs: true,
+                    quotingType: '"',
+                    forceQuotes: false
+                });
+            } catch (error) {
+                console.warn('[ProcessorService] Failed to apply upstream Clash rules:', error?.message || error);
+            }
         }
 
         return {

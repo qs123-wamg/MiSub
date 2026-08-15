@@ -811,7 +811,7 @@ describe('handleTelegramWebhook', () => {
     ))).toBe(true);
   });
   it('imports Clash YAML documents through the shared subscription parser', async () => {
-    const yaml = [
+    const yamlText = [
       'proxies:',
       '  - name: YAML-Node',
       '    type: vless',
@@ -819,10 +819,19 @@ describe('handleTelegramWebhook', () => {
       '    port: 443',
       '    uuid: 00000000-0000-4000-8000-000000000014',
       '    tls: true',
+      'proxy-groups:',
+      '  - name: YAML Select',
+      '    type: select',
+      '    proxies:',
+      '      - YAML-Node',
+      '      - DIRECT',
       'rule-providers:',
       '  reject:',
       '    type: http',
-      '    url: https://rules.example.com/reject.yaml'
+      '    url: https://rules.example.com/reject.yaml',
+      'rules:',
+      '  - RULE-SET,reject,REJECT',
+      '  - MATCH,YAML Select'
     ].join('\n');
     const { state, adapter } = createState();
     createAdapter.mockReturnValue(adapter);
@@ -833,7 +842,7 @@ describe('handleTelegramWebhook', () => {
         return new Response(JSON.stringify({ ok: true, result: { file_path: 'documents/nodes.yaml' } }), { status: 200 });
       }
       if (value.includes('/file/botbot-token/documents/nodes.yaml')) {
-        return new Response(yaml, { status: 200 });
+        return new Response(yamlText, { status: 200 });
       }
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
@@ -844,7 +853,7 @@ describe('handleTelegramWebhook', () => {
         document: {
           file_id: 'telegram-yaml-file-id',
           file_name: 'nodes.yaml',
-          file_size: yaml.length,
+          file_size: yamlText.length,
           mime_type: 'application/yaml'
         },
         chat: { id: 2108 },
@@ -860,7 +869,43 @@ describe('handleTelegramWebhook', () => {
       nodeCount: 1
     });
     expect(state.subscriptions[0].nodeUrls).toEqual([expect.stringMatching(/^vless:/)]);
+    expect(state.subscriptions[0].sourceClashConfig).toMatchObject({
+      rules: ['RULE-SET,reject,REJECT', 'MATCH,YAML Select'],
+      'rule-providers': {
+        reject: {
+          type: 'http',
+          url: 'https://rules.example.com/reject.yaml'
+        }
+      }
+    });
     expect(global.fetch.mock.calls.some(([url]) => String(url).includes('rules.example.com'))).toBe(false);
+
+    const previewCard = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .find(body => body.reply_markup?.inline_keyboard?.flat().some(button => button.callback_data?.startsWith('sp_yaml_')));
+    const yamlCallback = previewCard.reply_markup.inline_keyboard.flat()
+      .find(button => button.callback_data?.startsWith('sp_yaml_')).callback_data;
+
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'uploaded-yaml-export-callback',
+        data: yamlCallback,
+        from: { id: 1 },
+        message: { message_id: 109, chat: { id: 2108 } }
+      }
+    }), { MISUB_KV: null });
+
+    const documentCall = global.fetch.mock.calls.find(([url]) => String(url).includes('/sendDocument'));
+    const exportedConfig = yaml.load(await documentCall[1].body.get('document').text());
+    expect(exportedConfig.rules).toEqual(['RULE-SET,reject,REJECT', 'MATCH,YAML Select']);
+    expect(exportedConfig['rule-providers']).toEqual(state.subscriptions[0].sourceClashConfig['rule-providers']);
+    expect(exportedConfig['rule-providers']).not.toHaveProperty('geolocation-cn');
+    expect(exportedConfig['proxy-groups']).toEqual([{
+      name: 'YAML Select',
+      type: 'select',
+      proxies: [exportedConfig.proxies[0].name, 'DIRECT']
+    }]);
   });
   it('imports legacy Clash documents that use the singular Proxy key', async () => {
     const yaml = [

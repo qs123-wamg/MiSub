@@ -1389,7 +1389,7 @@ export function createClashDnsConfig() {
     };
 }
 
-export function applyClashExportBase(config = {}) {
+export function applyClashExportBase(config = {}, options = {}) {
     const {
         port: _port,
         'socks-port': _socksPort,
@@ -1409,11 +1409,11 @@ export function applyClashExportBase(config = {}) {
         ...content
     } = config && typeof config === 'object' && !Array.isArray(config) ? config : {};
 
-    return applyClashReferencePolicy(content);
+    return applyClashReferencePolicy(content, options);
 }
 
-export function serializeClashConfig(config, dumpOptions = {}) {
-    return yaml.dump(applyClashExportBase(config), {
+export function serializeClashConfig(config, dumpOptions = {}, policyOptions = {}) {
+    return yaml.dump(applyClashExportBase(config, policyOptions), {
         indent: 2,
         lineWidth: -1,
         noRefs: true,
@@ -1449,5 +1449,7 @@ export function generateClashConfig(urls, options = {}) {
         return '';
     }
 
-    return serializeClashConfig(createStandaloneClashConfig(proxies));
+    return serializeClashConfig(createStandaloneClashConfig(proxies), {}, {
+        sourceClashConfig: options.sourceClashConfig
+    });
 }

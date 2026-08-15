@@ -724,7 +724,9 @@ export async function handleMisubRequest(context) {
         // 如果没有 HTTP 订阅源（纯手动节点/过期订阅组），则始终写入缓存
         const stats = context.generationStats;
         if (!stats?.sourceCount || stats.upstreamSuccessCount > 0) {
-            await setCache(storageAdapter, cacheKey, freshNodes, sourceNames);
+            await setCache(storageAdapter, cacheKey, freshNodes, sourceNames, {
+                sourceClashConfig: context.sourceClashConfig || null
+            });
         }
         return freshNodes;
     };
@@ -789,7 +791,8 @@ export async function handleMisubRequest(context) {
                     templateSource,
                     managedConfigUrl: builtinOptions.managedConfigUrl,
                     storageAdapter,
-                    userInfoHeader
+                    userInfoHeader,
+                    sourceClashConfig: context.sourceClashConfig || null
                 });
 
                 if (rendered.headers?.['X-MiSub-Template-Mode'] === 'clash-yaml-profile') {
@@ -944,7 +947,8 @@ export async function handleMisubRequest(context) {
                 templateSource,
                 managedConfigUrl,
                 storageAdapter,
-                userInfoHeader
+                userInfoHeader,
+                sourceClashConfig: context.sourceClashConfig || null
             });
 
             // [Subconverter API] 处理 list=true 逻辑：仅输出节点片段
