@@ -590,6 +590,43 @@ describe('handleTelegramWebhook', () => {
     await invoke(buttons.find(button => button.callback_data.startsWith('sp_save_')).callback_data);
     expect(state.subscriptions).toHaveLength(1);
   });
+  it('shows the subscription preview for more than two direct nodes', async () => {
+    const nodeUrls = [
+      'anytls://sub_wWhcbH2TOzZSD7xcL6CAlij-%3Aand-f45785c5d45593d4@179.255.156.42:2086/?insecure=1#%E7%BE%8E%E5%9B%BD%20%C2%B7%20AnyTLS',
+      'anytls://sub_wWhcbH2TOzZSD7xcL6CAlij-%3Aand-f45785c5d45593d4@56.68.20.70:2086/?insecure=1#%E9%A9%AC%E6%9D%A5%E8%A5%BF%E4%BA%9A%20%C2%B7%20AnyTLS',
+      'anytls://sub_wWhcbH2TOzZSD7xcL6CAlij-%3Aand-f45785c5d45593d4@64.90.10.212:2086/?insecure=1#%E9%A6%99%E6%B8%AF%20%C2%B7%20AnyTLS'
+    ];
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: nodeUrls.join('\n'),
+        chat: { id: 2114 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(1);
+    expect(state.subscriptions[0]).toMatchObject({
+      type: 'inline',
+      name: 'Telegram 多节点订阅',
+      nodeUrls,
+      nodeCount: 3
+    });
+
+    const card = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .find(body => body.text?.includes('机场名称:'));
+    expect(card).toBeTruthy();
+    expect(card.text).toContain('Telegram 多节点订阅');
+    expect(card.text).toContain('节点总数:</b> 3');
+    expect(card.text).toContain('节点列表 (共 3 个)');
+    expect(card.reply_markup.inline_keyboard.flat()).toHaveLength(6);
+    expect(card.text).not.toContain('成功添加 1 个项目');
+  });
   it('downloads and imports supported Telegram text documents', async () => {
     const firstNode = 'vless://00000000-0000-4000-8000-000000000011@th.example.com:443?remarks=%E6%B3%B0%E5%9B%BDTH&security=tls';
     const secondNode = 'vless://00000000-0000-4000-8000-000000000012@sg.example.com:443?remarks=%E6%96%B0%E5%8A%A0%E5%9D%A1SG&security=tls';

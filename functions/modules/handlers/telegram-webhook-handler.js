@@ -3197,6 +3197,7 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
 
         const storageAdapter = await getCachedStorageAdapter(env, cache);
         const allSubscriptions = await getCachedSubscriptions(env, cache);
+        const shouldShowSubscriptionPreviewCard = options.showSubscriptionPreviewCard === true || nodeUrls.length > 2;
 
         // 3. 批量处理与去重
         const addedNodes = [];
@@ -3250,7 +3251,7 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
         }
 
         if (addedNodes.length === 0) {
-            if (options.showSubscriptionPreviewCard && existingInlineSubscription) {
+            if (shouldShowSubscriptionPreviewCard && existingInlineSubscription) {
                 const session = createInlinePreviewSession(existingInlineSubscription, userId, options.inlineFilename);
                 await persistPreviewSession(env, storageAdapter, session);
                 await sendTelegramMessage(chatId, buildSubscriptionPreviewCard(session), env, {
@@ -3324,7 +3325,7 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
             console.warn('[Telegram Push] Failed to clear node caches after node import:', cacheError?.message || cacheError);
         }
 
-        if (options.showSubscriptionPreviewCard && addedNodes.length === 1 && isInlineSubscription(addedNodes[0])) {
+        if (shouldShowSubscriptionPreviewCard && addedNodes.length === 1 && isInlineSubscription(addedNodes[0])) {
             const session = createInlinePreviewSession(addedNodes[0], userId, options.inlineFilename);
             await persistPreviewSession(env, storageAdapter, session);
             await sendTelegramMessage(chatId, buildSubscriptionPreviewCard(session), env, {
