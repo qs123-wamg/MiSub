@@ -3207,7 +3207,7 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
         if (options.forceInline || nodeUrls.length > 1) {
             const inlineSubscription = createInlineSubscription(
                 nodeUrls,
-                options.inlineName || 'Telegram 多节点订阅',
+                options.inlineName || extractNodeName(nodeUrls[0]),
                 userId,
                 options.sourceClashConfig
             );

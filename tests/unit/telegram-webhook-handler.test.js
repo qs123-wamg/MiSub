@@ -611,7 +611,7 @@ describe('handleTelegramWebhook', () => {
     expect(state.subscriptions).toHaveLength(1);
     expect(state.subscriptions[0]).toMatchObject({
       type: 'inline',
-      name: 'Telegram 多节点订阅',
+      name: '美国 · AnyTLS',
       nodeUrls,
       nodeCount: 3
     });
@@ -621,7 +621,7 @@ describe('handleTelegramWebhook', () => {
       .map(([, options]) => JSON.parse(options.body))
       .find(body => body.text?.includes('机场名称:'));
     expect(card).toBeTruthy();
-    expect(card.text).toContain('Telegram 多节点订阅');
+    expect(card.text).toContain('美国 · AnyTLS');
     expect(card.text).toContain('节点总数:</b> 3');
     expect(card.text).toContain('节点列表 (共 3 个)');
     expect(card.reply_markup.inline_keyboard.flat()).toHaveLength(6);
