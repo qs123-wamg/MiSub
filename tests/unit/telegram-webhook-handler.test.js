@@ -1976,6 +1976,30 @@ describe('handleTelegramWebhook', () => {
     ]);
   });
 
+  it('refreshes the Telegram command menu for any private-chat update', async () => {
+    const { adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: 'hello',
+        chat: { id: 3004, type: 'private' },
+        from: { id: 1, language_code: 'zh-Hans' }
+      }
+    }), { MISUB_KV: null });
+
+    expect(global.fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      'https://api.telegram.org/botbot-token/setMyCommands',
+      'https://api.telegram.org/botbot-token/setMyCommands',
+      'https://api.telegram.org/botbot-token/setChatMenuButton',
+      'https://api.telegram.org/botbot-token/setMyCommands',
+      'https://api.telegram.org/botbot-token/setMyCommands',
+      'https://api.telegram.org/botbot-token/setChatMenuButton',
+      'https://api.telegram.org/botbot-token/sendMessage'
+    ]);
+  });
+
   it('continues replying when Telegram rejects command menu configuration', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { adapter } = createState();

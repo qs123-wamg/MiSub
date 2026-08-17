@@ -4857,6 +4857,18 @@ export async function handleTelegramWebhook(request, env) {
             const chatId = message.chat.id;
             const text = message.text || message.caption || '';
 
+            // Telegram may deliver an existing private chat without a fresh command.
+            // Refresh its command menu on any private-chat update so clients that
+            // cached an older menu can receive the current commands and button.
+            if (message.chat.type === 'private') {
+                await ensureTelegramCommandMenu(
+                    chatId,
+                    env,
+                    requestCache,
+                    message.from.language_code
+                );
+            }
+
             // 检查用户权限
             const permissionCheck = checkUserPermission(userId, config);
             if (!permissionCheck.allowed) {
