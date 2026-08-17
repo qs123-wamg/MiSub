@@ -289,8 +289,9 @@ describe('handleTelegramWebhook', () => {
     const card = telegramBodies.at(-1);
     expect(card.text).toContain('机场名称:');
     expect(card.text).toContain('Demo-Airport');
-    expect(card.text).toContain('节点总数:</b> 1');
-    expect(card.text).toMatch(/使用进度:<\/b> [▰▱]{10} 3\.0%/);
+    expect(card.text).toContain('节点总数: 1');
+    expect(card.text).not.toContain('<b>');
+    expect(card.text).toMatch(/使用进度: [▰▱]{10} 3\.0%/);
     expect(card.text).toContain('Test-Node');
     expect(card.text).toContain(`<code>${subscriptionUrl}</code>`);
     expect(card.text).not.toContain('<a href=');
@@ -473,13 +474,14 @@ describe('handleTelegramWebhook', () => {
       .filter(([url]) => String(url).includes('/sendMessage'))
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
-    expect(card.text).toContain('流量详情:</b> 剩余 400.5GB');
-    expect(card.text).toContain('使用进度:</b> 未知');
-    expect(card.text).toContain('剩余可用:</b> 400.5GB');
-    expect(card.text).toContain('过期时间:</b> 2027-03-23');
-    expect(card.text).toContain('剩余时间:</b>');
-    expect(card.text).toContain('下次重置:</b> 14天');
-    expect(card.text).toContain('节点总数:</b> 1');
+    expect(card.text).toContain('流量详情: 剩余 400.5GB');
+    expect(card.text).toContain('使用进度: 未知');
+    expect(card.text).toContain('剩余可用: 400.5GB');
+    expect(card.text).toContain('过期时间: 2027-03-23');
+    expect(card.text).toContain('剩余时间:');
+    expect(card.text).toContain('下次重置: 14天');
+    expect(card.text).toContain('节点总数: 1');
+    expect(card.text).not.toContain('<b>');
   });
 
   it('shows up to 50 subscription preview nodes and preserves the hidden-node count', async () => {
@@ -741,7 +743,7 @@ describe('handleTelegramWebhook', () => {
       .find(body => body.text?.includes('机场名称:'));
     expect(card).toBeTruthy();
     expect(card.text).toContain('美国 · AnyTLS');
-    expect(card.text).toContain('节点总数:</b> 3');
+    expect(card.text).toContain('节点总数: 3');
     expect(card.text).toContain('节点列表 (共 3 个)');
     expect(card.reply_markup.inline_keyboard.flat()).toHaveLength(6);
     expect(card.text).not.toContain('成功添加 1 个项目');
@@ -800,7 +802,7 @@ describe('handleTelegramWebhook', () => {
     expect(card.text).toContain('订阅链接:');
     expect(card.text).toContain('本地文件 · 笔记 2026年7月27日 18_12_58.txt');
     expect(card.text).toContain('协议类型:');
-    expect(card.text).toContain('节点总数:</b> 2');
+    expect(card.text).toContain('节点总数: 2');
     expect(card.text).toContain('节点列表 (共 2 个)');
     const buttons = card.reply_markup.inline_keyboard.flat();
     expect(buttons).toHaveLength(6);
@@ -829,7 +831,7 @@ describe('handleTelegramWebhook', () => {
       .filter(([url]) => String(url).includes('/editMessageText'))
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
-    expect(refreshedCard.text).toContain('节点总数:</b> 2');
+    expect(refreshedCard.text).toContain('节点总数: 2');
 
     const saveCallback = buttons.find(button => button.callback_data.startsWith('sp_save_')).callback_data;
     await handleTelegramWebhook(createRequest({
@@ -962,7 +964,7 @@ describe('handleTelegramWebhook', () => {
     expect(sentBodies.some(body => (
       body.text?.includes('机场名称:')
       && body.text?.includes('mixed')
-      && body.text?.includes('节点总数:</b> 2')
+      && body.text?.includes('节点总数: 2')
       && body.reply_markup?.inline_keyboard?.flat().length === 6
     ))).toBe(true);
   });
@@ -1244,7 +1246,7 @@ describe('handleTelegramWebhook', () => {
       .map(([, options]) => JSON.parse(options.body))
       .find(body => body.text?.includes('机场名称:'));
     expect(card.text).toContain('一元机场');
-    expect(card.text).toContain('节点总数:</b> 2');
+    expect(card.text).toContain('节点总数: 2');
     expect(card.reply_markup.inline_keyboard.flat()).toHaveLength(6);
   });
   it('accepts extensionless JSON documents reported with an application/json MIME type', async () => {
@@ -1489,7 +1491,7 @@ describe('handleTelegramWebhook', () => {
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
     expect(previewBody.text).toContain('Original-Airport');
-    expect(previewBody.text).toContain('节点总数:</b> 2');
+    expect(previewBody.text).toContain('节点总数: 2');
     expect(previewBody.text).toContain(shortUrl);
     expect(previewBody.text).not.toContain(originalUrl);
   });
@@ -1525,7 +1527,7 @@ describe('handleTelegramWebhook', () => {
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
     expect(previewBody.text).toContain('Empty-Fallback-Node');
-    expect(previewBody.text).toContain('节点总数:</b> 1');
+    expect(previewBody.text).toContain('节点总数: 1');
   });
   it('keeps the embedded original subscription across a converter redirect to an error endpoint', async () => {
     const shortUrl = 'https://suo.yt/converter-error-endpoint';
@@ -1694,7 +1696,7 @@ describe('handleTelegramWebhook', () => {
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
     expect(previewBody.text).toContain('Fallback');
-    expect(previewBody.text).toContain('节点总数:</b> 1');
+    expect(previewBody.text).toContain('节点总数: 1');
 
     const buttons = previewBody.reply_markup.inline_keyboard.flat();
     const invoke = data => handleTelegramWebhook(createRequest({
@@ -1773,7 +1775,7 @@ describe('handleTelegramWebhook', () => {
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
     expect(previewBody.text).toContain('Redirect-UA-Node');
-    expect(previewBody.text).toContain('节点总数:</b> 1');
+    expect(previewBody.text).toContain('节点总数: 1');
   });
   it('refreshes a saved preview in place without creating a duplicate subscription', async () => {
     const subscriptionUrl = 'https://sub.example.com/refresh';

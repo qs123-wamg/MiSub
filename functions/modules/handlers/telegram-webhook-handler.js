@@ -1016,25 +1016,25 @@ function buildSubscriptionPreviewCard(session) {
         : session.sourceUrl;
     const sourceLink = `<code>${escapeHtml(displayUrl)}</code>`;
 
-    let message = `📋 <b>机场名称:</b> <code>${escapeHtml(displayName)}</code>\n`;
-    message += `🔗 <b>订阅链接:</b> ${sourceLink}\n`;
+    let message = `📋 机场名称: <code>${escapeHtml(displayName)}</code>\n`;
+    message += `🔗 订阅链接: ${sourceLink}\n`;
     if (hasSubscriptionInfo(info)) {
         const progressText = traffic.usagePercent === null
             ? '未知'
             : `${buildUsageProgress(traffic.usagePercent)} ${traffic.usagePercent.toFixed(1)}%`;
-        message += `<blockquote>📊 <b>流量详情:</b> ${escapeHtml(traffic.trafficText)} ${status}\n`;
-        message += `📈 <b>使用进度:</b> ${progressText}\n`;
-        message += `💵 <b>剩余可用:</b> ${escapeHtml(traffic.remainingText)}\n`;
-        message += `⌛ <b>过期时间:</b> ${formatExpiryDate(info.expire)}\n`;
-        message += `⌛ <b>剩余时间:</b> ${formatRemainingTime(info.expire)}`;
+        message += `<blockquote>📊 流量详情: ${escapeHtml(traffic.trafficText)} ${status}\n`;
+        message += `📈 使用进度: ${progressText}\n`;
+        message += `💵 剩余可用: ${escapeHtml(traffic.remainingText)}\n`;
+        message += `⌛ 过期时间: ${formatExpiryDate(info.expire)}\n`;
+        message += `⌛ 剩余时间: ${formatRemainingTime(info.expire)}`;
         if (Number(info.resetRemainingSeconds || 0) > 0) {
-            message += `\n🔄 <b>下次重置:</b> ${formatResetRemainingTime(info.resetRemainingSeconds)}`;
+            message += `\n🔄 下次重置: ${formatResetRemainingTime(info.resetRemainingSeconds)}`;
         }
         message += '</blockquote>\n';
     }
-    message += `<blockquote>🔌 <b>协议类型:</b> ${escapeHtml(protocols.join('、') || '未识别')}\n`;
-    message += `📊 <b>节点总数:</b> ${nodes.length} | <b>国家/地区数:</b> ${regions.length}\n`;
-    message += `🏳️ <b>节点范围:</b> ${escapeHtml(regionText)}</blockquote>\n`;
+    message += `<blockquote>🔌 协议类型: ${escapeHtml(protocols.join('、') || '未识别')}\n`;
+    message += `📊 节点总数: ${nodes.length} | 国家/地区数: ${regions.length}\n`;
+    message += `🏳️ 节点范围: ${escapeHtml(regionText)}</blockquote>\n`;
 
     const blockStart = `<blockquote expandable>📑 节点列表 (共 ${nodes.length} 个)\n`;
     const blockEnd = '</blockquote>';
