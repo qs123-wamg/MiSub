@@ -363,17 +363,15 @@ function buildBatchSubscriptionReport(results) {
             const preview = result.preview;
             const info = preview.userInfo || {};
             const nodes = result.nodes || [];
-            const traffic = getSubscriptionTrafficDisplay(info, formatTrafficBytes);
+            const details = getSubscriptionInfoDisplay(info, formatTrafficBytes);
 
             lines.push(`机场名称: ${preview.name || '未命名订阅'}`);
             lines.push(`节点总数: ${nodes.length}`);
-            if (hasSubscriptionInfo(info)) {
-                lines.push(`流量详情: ${traffic.trafficText}`);
-                lines.push(`使用进度: ${traffic.usagePercent === null ? '未知' : `${traffic.usagePercent.toFixed(1)}%`}`);
-                lines.push(`剩余可用: ${traffic.remainingText}`);
-            }
-            lines.push(`过期时间: ${formatExpiryDate(info.expire)}`);
-            lines.push(`剩余时间: ${formatRemainingTime(info.expire)}`);
+            lines.push(`流量详情: ${details.trafficText}`);
+            lines.push(`使用进度: ${details.usagePercent === null ? '未知' : `${details.usagePercent.toFixed(1)}%`}`);
+            lines.push(`剩余可用: ${details.remainingText}`);
+            lines.push(`过期时间: ${details.expiryText}`);
+            lines.push(`剩余时间: ${details.remainingTimeText}`);
             if (Number(info.resetRemainingSeconds || 0) > 0) {
                 lines.push(`下次重置: ${formatResetRemainingTime(info.resetRemainingSeconds)}`);
             }
@@ -872,6 +870,24 @@ function getSubscriptionTrafficDisplay(info, format = formatTrafficBytes) {
     };
 }
 
+function getSubscriptionInfoDisplay(info, format = formatTrafficBytes) {
+    const traffic = getSubscriptionTrafficDisplay(info, format);
+    const hasTraffic = normalizeTrafficBytes(info?.upload) > 0
+        || normalizeTrafficBytes(info?.download) > 0
+        || normalizeTrafficBytes(info?.total) > 0
+        || info?.trafficIsRemaining === true;
+    const expire = Number(info?.expire || 0);
+    const hasExpiry = Number.isFinite(expire) && expire > 0;
+
+    return {
+        trafficText: hasTraffic ? traffic.trafficText : '未知',
+        usagePercent: hasTraffic ? traffic.usagePercent : null,
+        remainingText: hasTraffic ? traffic.remainingText : '未知',
+        expiryText: hasExpiry ? formatExpiryDate(expire) : '长期有效',
+        remainingTimeText: hasExpiry ? formatRemainingTime(expire) : '长期有效'
+    };
+}
+
 function formatSubscriptionListTraffic(value) {
     const bytes = Number(value || 0);
     if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -888,10 +904,10 @@ function formatSubscriptionListTraffic(value) {
 
 function getSubscriptionExpirySummary(expireSeconds) {
     const expire = Number(expireSeconds || 0);
-    if (!Number.isFinite(expire) || expire <= 0) return { text: '未知', expiring: false, expired: false };
+    if (!Number.isFinite(expire) || expire <= 0) return { text: '长期有效', expiring: false, expired: false };
 
     const expireDate = new Date(expire * 1000);
-    if (!Number.isFinite(expireDate.getTime())) return { text: '未知', expiring: false, expired: false };
+    if (!Number.isFinite(expireDate.getTime())) return { text: '长期有效', expiring: false, expired: false };
     if (expireDate.getUTCFullYear() >= 2099) return { text: '长期有效', expiring: false, expired: false };
 
     const remainingMs = expire * 1000 - Date.now();
@@ -1012,7 +1028,7 @@ function buildSubscriptionPreviewCard(session) {
     const protocols = [...new Set(nodes.map(node => node.protocol).filter(Boolean))];
     const regions = [...new Set(nodes.map(node => node.region).filter(region => region && region !== '其他'))];
     const info = session.userInfo || {};
-    const traffic = getSubscriptionTrafficDisplay(info);
+    const details = getSubscriptionInfoDisplay(info);
     const expire = Number(info.expire || 0);
     const status = Number.isFinite(expire) && expire > 0 && expire * 1000 <= Date.now()
         ? '🔴 已到期'
@@ -1028,20 +1044,18 @@ function buildSubscriptionPreviewCard(session) {
 
     let message = `📋 机场名称: <code>${escapeHtml(displayName)}</code>\n`;
     message += `🔗 订阅链接: ${sourceLink}\n`;
-    if (hasSubscriptionInfo(info)) {
-        const progressText = traffic.usagePercent === null
-            ? '未知'
-            : `${buildUsageProgress(traffic.usagePercent)} ${traffic.usagePercent.toFixed(1)}%`;
-        message += `<blockquote>📊 流量详情: ${escapeHtml(traffic.trafficText)} ${status}\n`;
-        message += `📈 使用进度: ${progressText}\n`;
-        message += `💵 剩余可用: ${escapeHtml(traffic.remainingText)}\n`;
-        message += `⌛ 过期时间: ${formatExpiryDate(info.expire)}\n`;
-        message += `⌛ 剩余时间: ${formatRemainingTime(info.expire)}`;
-        if (Number(info.resetRemainingSeconds || 0) > 0) {
-            message += `\n🔄 下次重置: ${formatResetRemainingTime(info.resetRemainingSeconds)}`;
-        }
-        message += '</blockquote>\n';
+    const progressText = details.usagePercent === null
+        ? '未知'
+        : `${buildUsageProgress(details.usagePercent)} ${details.usagePercent.toFixed(1)}%`;
+    message += `<blockquote>📊 流量详情: ${escapeHtml(details.trafficText)} ${status}\n`;
+    message += `📈 使用进度: ${progressText}\n`;
+    message += `💵 剩余可用: ${escapeHtml(details.remainingText)}\n`;
+    message += `🗓️ 过期时间: ${details.expiryText}\n`;
+    message += `⌛ 剩余时间: ${details.remainingTimeText}`;
+    if (Number(info.resetRemainingSeconds || 0) > 0) {
+        message += `\n🔄 下次重置: ${formatResetRemainingTime(info.resetRemainingSeconds)}`;
     }
+    message += '</blockquote>\n';
     message += `<blockquote>🔌 协议类型: ${escapeHtml(protocols.join('、') || '未识别')}\n`;
     message += `📊 节点总数: ${nodes.length} | 国家/地区数: ${regions.length}\n`;
     message += `🏳️ 节点范围: ${escapeHtml(regionText)}</blockquote>\n`;
@@ -1149,7 +1163,7 @@ function buildStoredSubscriptionDetailCard(session) {
     const nodes = getPreviewNodes(session);
     const nodeCount = Math.max(nodes.length, Number(session.storedNodeCount || 0));
     const info = session.userInfo || {};
-    const traffic = getSubscriptionTrafficDisplay(info, formatSubscriptionListTraffic);
+    const details = getSubscriptionInfoDisplay(info, formatSubscriptionListTraffic);
     const sourceUrl = session.isRemote
         ? truncateTelegramText(session.sourceUrl, 360)
         : '本地内嵌订阅';
@@ -1159,20 +1173,18 @@ function buildStoredSubscriptionDetailCard(session) {
     message += `<b>配置名称:</b> <code>${escapeHtml(name)}</code>\n`;
     message += `<b>订阅来源:</b>\n<code>${escapeHtml(sourceUrl)}</code>\n`;
 
-    if (hasSubscriptionInfo(info)) {
-        const progressText = traffic.usagePercent === null
-            ? '未知'
-            : `${buildUsageProgress(traffic.usagePercent)} ${traffic.usagePercent.toFixed(1)}%`;
-        message += `<blockquote><b>流量详情:</b> ${escapeHtml(traffic.trafficText)}\n`;
-        message += `<b>使用进度:</b> ${progressText}\n`;
-        message += `<b>剩余可用:</b> ${escapeHtml(traffic.remainingText)}\n`;
-        message += `<b>过期时间:</b> ${formatExpiryDate(info.expire)}\n`;
-        message += `<b>剩余时间:</b> ${formatRemainingTime(info.expire)}`;
-        if (Number(info.resetRemainingSeconds || 0) > 0) {
-            message += `\n<b>下次重置:</b> ${formatResetRemainingTime(info.resetRemainingSeconds)}`;
-        }
-        message += '</blockquote>\n';
+    const progressText = details.usagePercent === null
+        ? '未知'
+        : `${buildUsageProgress(details.usagePercent)} ${details.usagePercent.toFixed(1)}%`;
+    message += `<blockquote><b>流量详情:</b> ${escapeHtml(details.trafficText)}\n`;
+    message += `<b>使用进度:</b> ${progressText}\n`;
+    message += `<b>剩余可用:</b> ${escapeHtml(details.remainingText)}\n`;
+    message += `<b>🗓️ 过期时间:</b> ${details.expiryText}\n`;
+    message += `<b>剩余时间:</b> ${details.remainingTimeText}`;
+    if (Number(info.resetRemainingSeconds || 0) > 0) {
+        message += `\n<b>下次重置:</b> ${formatResetRemainingTime(info.resetRemainingSeconds)}`;
     }
+    message += '</blockquote>\n';
 
     let nodeLines = nodes.slice(0, TELEGRAM_SUBSCRIPTION_DETAIL_NODE_LIMIT).map((node, index) => (
         `${index + 1}. [${escapeHtml(String(node.protocol || '未知').toUpperCase())}] ${escapeHtml(truncateTelegramText(node.name || '未命名节点', 100))}`

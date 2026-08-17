@@ -364,6 +364,41 @@ describe('handleTelegramWebhook', () => {
     expect(sentBodies.some(body => body.text?.includes('https://example.com/profiles/tg-'))).toBe(true);
   });
 
+  it('keeps unknown traffic and long-term expiry visible when subscription metadata is missing', async () => {
+    const subscriptionUrl = 'https://sub.example.com/without-metadata';
+    const nodeUrl = 'vless://00000000-0000-4000-8000-000000000004@node.example.com:443?security=tls#No-Metadata';
+    const { adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (url === subscriptionUrl) {
+        return new Response(btoa(`${nodeUrl}\n`), {
+          status: 200,
+          headers: { 'Content-Disposition': 'attachment; filename=No-Metadata.yaml' }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: subscriptionUrl,
+        chat: { id: 2103 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    const card = JSON.parse(global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .at(-1)[1].body);
+    expect(card.text).toContain('📊 流量详情: 未知');
+    expect(card.text).toContain('📈 使用进度: 未知');
+    expect(card.text).toContain('💵 剩余可用: 未知');
+    expect(card.text).toContain('🗓️ 过期时间: 长期有效');
+    expect(card.text).toContain('⌛ 剩余时间: 长期有效');
+  });
+
   it('sends a summary and one TXT report when more than five subscription URLs are provided', async () => {
     const urls = Array.from({ length: 6 }, (_, index) => `https://sub.example.com/batch-${index + 1}`);
     const validNode = 'trojan://password@valid.example.com:443?security=tls#Valid-Node';
@@ -433,6 +468,8 @@ describe('handleTelegramWebhook', () => {
     expect(report).toContain('链接总数: 6');
     expect(report).toContain('查询统计: 有效: 1 | 耗尽: 1 | 过期: 1 | 失效: 3');
     expect(report).toContain(`订阅链接: ${urls[0]}`);
+    expect(report).toContain('流量详情: 未知');
+    expect(report).toContain('过期时间: 长期有效');
     expect(report).toContain(validNode);
     expect(report).toContain('状态: 耗尽');
     expect(report).toContain('状态: 过期');
