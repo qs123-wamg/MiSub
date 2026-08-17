@@ -1874,8 +1874,8 @@ describe('handleTelegramWebhook', () => {
       }
     }), { MISUB_KV: null });
 
-    expect(global.fetch).toHaveBeenCalledTimes(4);
-    const body = JSON.parse(global.fetch.mock.calls[3][1].body);
+    expect(global.fetch).toHaveBeenCalledTimes(6);
+    const body = JSON.parse(global.fetch.mock.calls[5][1].body);
     expect(body.text).toContain('/delete');
     expect(body.text).toContain('/search');
     expect(body.text).toContain('/sort');
@@ -1891,19 +1891,32 @@ describe('handleTelegramWebhook', () => {
       message: {
         text: '/start',
         chat: { id: 3002 },
-        from: { id: 1 }
+        from: { id: 1, language_code: 'zh-Hans' }
       }
     }), { MISUB_KV: null });
 
     expect(global.fetch.mock.calls.map(([url]) => String(url))).toEqual([
       'https://api.telegram.org/botbot-token/setMyCommands',
+      'https://api.telegram.org/botbot-token/setMyCommands',
       'https://api.telegram.org/botbot-token/setChatMenuButton',
+      'https://api.telegram.org/botbot-token/setMyCommands',
+      'https://api.telegram.org/botbot-token/setMyCommands',
       'https://api.telegram.org/botbot-token/setChatMenuButton',
       'https://api.telegram.org/botbot-token/sendMessage'
     ]);
 
-    const commandsBody = JSON.parse(global.fetch.mock.calls[0][1].body);
-    expect(commandsBody).toEqual({
+    const defaultCommandsBody = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(defaultCommandsBody).toEqual({
+      commands: [
+        { command: 'start', description: '开始使用 MiSub' },
+        { command: 'help', description: '查看帮助' },
+        { command: 'list', description: '查看节点和订阅列表' }
+      ],
+      scope: { type: 'default' }
+    });
+
+    const privateCommandsBody = JSON.parse(global.fetch.mock.calls[1][1].body);
+    expect(privateCommandsBody).toEqual({
       commands: [
         { command: 'start', description: '开始使用 MiSub' },
         { command: 'help', description: '查看帮助' },
@@ -1912,29 +1925,52 @@ describe('handleTelegramWebhook', () => {
       scope: { type: 'all_private_chats' }
     });
 
-    const menuBody = JSON.parse(global.fetch.mock.calls[1][1].body);
+    const menuBody = JSON.parse(global.fetch.mock.calls[2][1].body);
     expect(menuBody).toEqual({
       menu_button: { type: 'commands' }
     });
 
-    const chatMenuBody = JSON.parse(global.fetch.mock.calls[2][1].body);
+    const chatCommandsBody = JSON.parse(global.fetch.mock.calls[3][1].body);
+    expect(chatCommandsBody).toEqual({
+      commands: [
+        { command: 'start', description: '开始使用 MiSub' },
+        { command: 'help', description: '查看帮助' },
+        { command: 'list', description: '查看节点和订阅列表' }
+      ],
+      scope: { type: 'chat', chat_id: 3002 }
+    });
+
+    const localizedChatCommandsBody = JSON.parse(global.fetch.mock.calls[4][1].body);
+    expect(localizedChatCommandsBody).toEqual({
+      commands: [
+        { command: 'start', description: '开始使用 MiSub' },
+        { command: 'help', description: '查看帮助' },
+        { command: 'list', description: '查看节点和订阅列表' }
+      ],
+      scope: { type: 'chat', chat_id: 3002 },
+      language_code: 'zh'
+    });
+
+    const chatMenuBody = JSON.parse(global.fetch.mock.calls[5][1].body);
     expect(chatMenuBody).toEqual({
       chat_id: 3002,
       menu_button: { type: 'commands' }
     });
 
-    const messageBody = JSON.parse(global.fetch.mock.calls[3][1].body);
+    const messageBody = JSON.parse(global.fetch.mock.calls[6][1].body);
     expect(messageBody.text).toContain('欢迎使用 MiSub Telegram Bot');
 
     await handleTelegramWebhook(createRequest({
       message: {
         text: '/help',
         chat: { id: 3002 },
-        from: { id: 1 }
+        from: { id: 1, language_code: 'zh-Hans' }
       }
     }), { MISUB_KV: null });
 
-    expect(global.fetch.mock.calls.slice(4).map(([url]) => String(url))).toEqual([
+    expect(global.fetch.mock.calls.slice(7).map(([url]) => String(url))).toEqual([
+      'https://api.telegram.org/botbot-token/setMyCommands',
+      'https://api.telegram.org/botbot-token/setMyCommands',
       'https://api.telegram.org/botbot-token/setChatMenuButton',
       'https://api.telegram.org/botbot-token/sendMessage'
     ]);
@@ -1964,11 +2000,13 @@ describe('handleTelegramWebhook', () => {
       expect(response.status).toBe(200);
       expect(global.fetch.mock.calls.map(([url]) => String(url))).toEqual([
         'https://api.telegram.org/botbot-token/setMyCommands',
+        'https://api.telegram.org/botbot-token/setMyCommands',
         'https://api.telegram.org/botbot-token/setChatMenuButton',
+        'https://api.telegram.org/botbot-token/setMyCommands',
         'https://api.telegram.org/botbot-token/setChatMenuButton',
         'https://api.telegram.org/botbot-token/sendMessage'
       ]);
-      const messageBody = JSON.parse(global.fetch.mock.calls[3][1].body);
+      const messageBody = JSON.parse(global.fetch.mock.calls[5][1].body);
       expect(messageBody.text).toContain('欢迎使用 MiSub Telegram Bot');
     } finally {
       errorSpy.mockRestore();
@@ -1993,8 +2031,8 @@ describe('handleTelegramWebhook', () => {
       }
     }), { MISUB_KV: null });
 
-    expect(global.fetch).toHaveBeenCalledTimes(4);
-    const body = JSON.parse(global.fetch.mock.calls[3][1].body);
+    expect(global.fetch).toHaveBeenCalledTimes(6);
+    const body = JSON.parse(global.fetch.mock.calls[5][1].body);
     expect(body.text).toContain('请选择列表类型');
     expect(body.text).toContain('节点列表');
     expect(body.text).toContain('机场列表');
@@ -2032,7 +2070,7 @@ describe('handleTelegramWebhook', () => {
       }
     }), { MISUB_KV: null });
 
-    const body = JSON.parse(global.fetch.mock.calls[3][1].body);
+    const body = JSON.parse(global.fetch.mock.calls[5][1].body);
     expect(body.text).toContain('订阅列表 共11个');
     expect(body.text).toContain('🟠1个临期');
     expect(body.text).toContain('第1/2页');

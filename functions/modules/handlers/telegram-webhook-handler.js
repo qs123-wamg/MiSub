@@ -1661,11 +1661,10 @@ function parseTargetArgs(args) {
 /**
  * 配置 Telegram 左下角的命令菜单。
  *
- * setMyCommands 负责所有私人聊天的命令列表，setChatMenuButton 负责默认
- * 菜单按钮。当前聊天额外设置一次，用于覆盖可能残留的聊天级菜单配置。
- * 配置失败不应阻断命令的正常回复。
+ * 同时设置默认、所有私人聊天、当前聊天及当前语言的命令列表，避免历史
+ * 聊天级或语言级配置覆盖新菜单。配置失败不应阻断命令的正常回复。
  */
-async function ensureTelegramCommandMenu(chatId, env, requestCache = null) {
+async function ensureTelegramCommandMenu(chatId, env, requestCache = null, languageCode = '') {
     const cache = requestCache || createRequestCache();
     if (cache.telegramCommandMenuConfigured) return;
     cache.telegramCommandMenuConfigured = true;
@@ -1686,18 +1685,18 @@ async function ensureTelegramCommandMenu(chatId, env, requestCache = null) {
         if (!telegramCommandMenuState.defaultConfigurationPromise) {
             telegramCommandMenuState.defaultConfigurationPromise = (async () => {
                 let configured = true;
-                const commandsResponse = await fetch(`${apiBase}/setMyCommands`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        commands: TELEGRAM_COMMAND_MENU,
-                        scope: { type: 'all_private_chats' }
-                    })
-                });
-                if (!await isTelegramApiResponseSuccessful(commandsResponse)) {
-                    configured = false;
-                    console.error('[Telegram Push] Failed to configure bot commands:', await readTelegramApiError(commandsResponse));
-                }
+                configured = await setTelegramCommands(
+                    apiBase,
+                    { type: 'default' },
+                    '',
+                    'default'
+                ) && configured;
+                configured = await setTelegramCommands(
+                    apiBase,
+                    { type: 'all_private_chats' },
+                    '',
+                    'private chats'
+                ) && configured;
 
                 const menuResponse = await fetch(`${apiBase}/setChatMenuButton`, {
                     method: 'POST',
@@ -1723,6 +1722,23 @@ async function ensureTelegramCommandMenu(chatId, env, requestCache = null) {
             telegramCommandMenuState.defaultConfigurationPromise = null;
         }
 
+        await setTelegramCommands(
+            apiBase,
+            { type: 'chat', chat_id: chatId },
+            '',
+            `chat ${chatId}`
+        );
+
+        const normalizedLanguageCode = normalizeTelegramCommandLanguageCode(languageCode);
+        if (normalizedLanguageCode) {
+            await setTelegramCommands(
+                apiBase,
+                { type: 'chat', chat_id: chatId },
+                normalizedLanguageCode,
+                `chat ${chatId} language ${normalizedLanguageCode}`
+            );
+        }
+
         const chatMenuResponse = await fetch(`${apiBase}/setChatMenuButton`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1737,6 +1753,33 @@ async function ensureTelegramCommandMenu(chatId, env, requestCache = null) {
     } catch (error) {
         console.error('[Telegram Push] Error configuring command menu:', error);
     }
+}
+
+async function setTelegramCommands(apiBase, scope, languageCode = '', label = scope.type) {
+    const body = {
+        commands: TELEGRAM_COMMAND_MENU,
+        scope
+    };
+    if (languageCode) body.language_code = languageCode;
+
+    const response = await fetch(`${apiBase}/setMyCommands`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+    if (await isTelegramApiResponseSuccessful(response)) return true;
+
+    console.error(
+        `[Telegram Push] Failed to configure bot commands for ${label}:`,
+        await readTelegramApiError(response)
+    );
+    return false;
+}
+
+function normalizeTelegramCommandLanguageCode(languageCode) {
+    if (typeof languageCode !== 'string') return '';
+    const match = languageCode.trim().toLowerCase().match(/^[a-z]{2}/);
+    return match?.[0] || '';
 }
 
 async function isTelegramApiResponseSuccessful(response) {
@@ -3707,13 +3750,13 @@ async function handleTelegramDocumentInput(chatId, document, userId, env, reques
 /**
  * 处理命令
  */
-async function handleCommand(chatId, text, userId, env, request, requestCache = null) {
+async function handleCommand(chatId, text, userId, env, request, requestCache = null, languageCode = '') {
     const parts = text.split(/\s+/);
     const command = parts[0].toLowerCase().split('@')[0]; // 移除 @botname
     const args = parts.slice(1);
 
     if (['/start', '/help', '/list'].includes(command)) {
-        await ensureTelegramCommandMenu(chatId, env, requestCache);
+        await ensureTelegramCommandMenu(chatId, env, requestCache, languageCode);
     }
 
     switch (command) {
@@ -4829,7 +4872,15 @@ export async function handleTelegramWebhook(request, env) {
 
             // 处理命令或节点输入
             if (text.startsWith('/')) {
-                return await handleCommand(chatId, text, userId, env, request, requestCache);
+                return await handleCommand(
+                    chatId,
+                    text,
+                    userId,
+                    env,
+                    request,
+                    requestCache,
+                    message.from.language_code
+                );
             } else {
                 return await handleNodeInput(chatId, text, userId, env, requestCache);
             }
