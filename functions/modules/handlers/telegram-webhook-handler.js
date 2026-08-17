@@ -297,6 +297,12 @@ function formatTelegramFailureReason(error, maxLength = 1200) {
 }
 
 function buildTelegramParseFailureMessage(title, error) {
+    if (error?.code === 'SUBSCRIPTION_HTML_CONTENT') {
+        return '❌ 无法解析订阅内容：\n\n' +
+            '⚠️ 该链接返回的是网页内容（HTML），不是订阅数据。' +
+            '请确认订阅链接是否完整（通常包含 /api/ 或 token= 等参数）。';
+    }
+
     const reason = formatTelegramFailureReason(error);
     return `❌ <b>${escapeHtml(title)}</b>\n\n<b>失败原因:</b> ${escapeHtml(reason)}`;
 }
@@ -581,7 +587,16 @@ function createSubscriptionContentError(content, response, url) {
     if (!text.trim()) {
         return new Error(`内容解析阶段失败：${getUrlHostname(url)} 返回了空订阅内容`);
     }
-    const contentType = String(response?.headers?.get('Content-Type') || '未知').split(';')[0].trim() || '未知';
+    const contentTypeHeader = String(response?.headers?.get('Content-Type') || '');
+    const contentType = contentTypeHeader.split(';')[0].trim() || '未知';
+    const looksLikeHtml = /^(?:text\/html|application\/xhtml\+xml)$/i.test(contentType)
+        || /^\s*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(text);
+    if (looksLikeHtml) {
+        const error = new Error('该链接返回的是网页内容（HTML），不是订阅数据');
+        error.code = 'SUBSCRIPTION_HTML_CONTENT';
+        return error;
+    }
+
     return new Error(
         `内容解析阶段失败：下载成功，但未识别到支持的节点格式` +
         `（Content-Type: ${contentType}，内容长度: ${text.length} 字符）`
@@ -880,6 +895,7 @@ function getSubscriptionInfoDisplay(info, format = formatTrafficBytes) {
     const hasExpiry = Number.isFinite(expire) && expire > 0;
 
     return {
+        hasTraffic,
         trafficText: hasTraffic ? traffic.trafficText : '未知',
         usagePercent: hasTraffic ? traffic.usagePercent : null,
         remainingText: hasTraffic ? traffic.remainingText : '未知',
@@ -1044,16 +1060,21 @@ function buildSubscriptionPreviewCard(session) {
 
     let message = `📋 机场名称: <code>${escapeHtml(displayName)}</code>\n`;
     message += `🔗 订阅链接: ${sourceLink}\n`;
-    const progressText = details.usagePercent === null
-        ? '未知'
-        : `${buildUsageProgress(details.usagePercent)} ${details.usagePercent.toFixed(1)}%`;
-    message += `<blockquote>📊 流量详情: ${escapeHtml(details.trafficText)} ${status}\n`;
-    message += `📈 使用进度: ${progressText}\n`;
-    message += `💵 剩余可用: ${escapeHtml(details.remainingText)}\n`;
-    message += `🗓️ 过期时间: ${details.expiryText}\n`;
-    message += `⌛ 剩余时间: ${details.remainingTimeText}`;
-    if (Number(info.resetRemainingSeconds || 0) > 0) {
-        message += `\n🔄 下次重置: ${formatResetRemainingTime(info.resetRemainingSeconds)}`;
+    message += `<blockquote>📊 流量详情: ${escapeHtml(details.trafficText)}`;
+    if (details.hasTraffic) {
+        const progressText = details.usagePercent === null
+            ? '未知'
+            : `${buildUsageProgress(details.usagePercent)} ${details.usagePercent.toFixed(1)}%`;
+        message += ` ${status}\n`;
+        message += `📈 使用进度: ${progressText}\n`;
+        message += `💵 剩余可用: ${escapeHtml(details.remainingText)}\n`;
+        message += `🗓️ 过期时间: ${details.expiryText}\n`;
+        message += `⌛ 剩余时间: ${details.remainingTimeText}`;
+        if (Number(info.resetRemainingSeconds || 0) > 0) {
+            message += `\n🔄 下次重置: ${formatResetRemainingTime(info.resetRemainingSeconds)}`;
+        }
+    } else {
+        message += `\n🗓️ 过期时间: ${details.expiryText}`;
     }
     message += '</blockquote>\n';
     message += `<blockquote>🔌 协议类型: ${escapeHtml(protocols.join('、') || '未识别')}\n`;
@@ -1490,6 +1511,8 @@ async function showNodePreview(chatId, nodeUrl, userId, env, requestCache = null
         !isSubscriptionEntry(item) && item.url === parsedNode.url
     ));
     const session = createNodePreviewSession(parsedNode.url, userId, savedNode, options.sessionId);
+    if (options.filename) session.filename = String(options.filename).trim() || session.filename;
+    session.sourceClashConfig = normalizeClashSourceConfig(options.sourceClashConfig);
     await persistPreviewSession(env, storageAdapter, session);
 
     const message = buildNodePreviewCard(session);
@@ -2330,53 +2353,31 @@ async function handleListCommand(chatId, userId, env, page = 0, type = 'all', me
         const startIdx = currentPage * pageSize;
         const endIdx = Math.min(startIdx + pageSize, userNodes.length);
 
-        let message = `\uD83D\uDCCB <b>${title}</b> (${userNodes.length} 个)\n`; // 📋
-        message += `第 ${currentPage + 1}/${totalPages} 页`;
+        let message = `\uD83D\uDCCB ${title} 共${userNodes.length}个 | 第${currentPage + 1}/${totalPages}页`; // 📋
         if (boundProfile) {
             message += ` | 绑定: ${escapeHtml(boundProfile.name)}`;
         }
-        message += '\n\n';
 
+        // 与机场列表一致，每个节点使用一整行可点击按钮。
+        const nodeRows = [];
         for (let i = startIdx; i < endIdx; i++) {
             const node = userNodes[i];
-            const nodeUrl = node.url || '';
             const isSub = isSubscriptionEntry(node);
-
-            let protocol = '未知';
-            if (isSub) {
-                protocol = '订阅';
-            } else if (nodeUrl.includes('://')) {
-                try {
-                    protocol = nodeUrl.split('://')[0].toUpperCase();
-                } catch (e) {
-                    protocol = 'UNKNOWN';
-                }
-            }
-
-            const status = node.enabled ? '\u2705' : '\u26D4'; // ✅ ⛔
-            const inProfile = boundNodeIds.has(node.id) ? '\uD83D\uDD17' : ''; // 🔗
-            const typeIcon = isSub ? '\uD83D\uDCE1 ' : '\uD83D\uDE80 '; // 📡 🚀
-
-            message += `<b>${i + 1}.</b> ${status}${inProfile} ${typeIcon}${escapeHtml(node.name || '未命名')} <code>${protocol}</code>\n`;
-        }
-
-        message += '\n点击序号查看详情和操作';
-
-        // 构建按钮：当前页节点的快捷按钮
-        const nodeButtons = [];
-        for (let i = startIdx; i < endIdx; i++) {
-            const isSubList = type === 'sub';
-            // 如果是混合列表('all'), 检测URL; 如果明确是 'sub', 则就是sub.
-            // 但 handleListCommand 的 type 参数已经区分了 'node', 'sub', 'all'.
-            // 这里我们尽量明确:
-            const actionPrefix = (type === 'sub' || (type === 'all' && isSubscriptionEntry(userNodes[i])))
+            const nodeUrl = node.url || '';
+            const protocol = isSub
+                ? '订阅'
+                : (nodeUrl.includes('://') ? nodeUrl.split('://')[0].toUpperCase() : '未知');
+            const actionPrefix = (type === 'sub' || (type === 'all' && isSub))
                 ? 'node_action_sub_'
                 : 'node_action_node_';
+            const status = node.enabled ? '\u2705' : '\u26D4'; // ✅ ⛔
+            const inProfile = boundNodeIds.has(node.id) ? ' \uD83D\uDD17' : ''; // 🔗
+            const name = truncateTelegramText(node.name || '未命名', 32);
 
-            nodeButtons.push({
-                text: `${i + 1}`,
+            nodeRows.push([{
+                text: `${status}${inProfile} #${i + 1} ${name} [${protocol}]`,
                 callback_data: `${actionPrefix}${i}`
-            });
+            }]);
         }
 
         // 分页按钮
@@ -2404,7 +2405,7 @@ async function handleListCommand(chatId, userId, env, page = 0, type = 'all', me
 
         const keyboard = {
             inline_keyboard: [
-                nodeButtons,
+                ...nodeRows,
                 navButtons,
                 backButtonRow
             ]
@@ -3520,8 +3521,30 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
             return createJsonResponse({ ok: true });
         }
 
-        if (nodeUrls.length === 1 && !options.forceInline && options.skipNodePreview !== true) {
-            await showNodePreview(chatId, nodeUrls[0], userId, env, cache);
+        if (nodeUrls.length === 1 && options.skipNodePreview !== true) {
+            await showNodePreview(chatId, nodeUrls[0], userId, env, cache, {
+                filename: options.inlineFilename,
+                sourceClashConfig: options.sourceClashConfig
+            });
+            return createJsonResponse({ ok: true });
+        }
+
+        if (nodeUrls.length > 1 && !options.forceInline && options.skipNodePreview !== true) {
+            const storageAdapter = await getCachedStorageAdapter(env, cache);
+            const previewSubscription = createInlineSubscription(
+                nodeUrls,
+                options.inlineName || extractNodeName(nodeUrls[0]),
+                userId,
+                options.sourceClashConfig
+            );
+            const session = createInlinePreviewSession(previewSubscription, userId, options.inlineFilename);
+            session.savedSubscriptionId = null;
+            await persistPreviewSession(env, storageAdapter, session);
+            await sendTelegramMessage(chatId, buildSubscriptionPreviewCard(session), env, {
+                reply_markup: buildSubscriptionPreviewKeyboard(session),
+                requestCache: cache,
+                disable_web_page_preview: true
+            });
             return createJsonResponse({ ok: true });
         }
 
@@ -4022,15 +4045,20 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                     if (session.sourceType === 'node') {
                         await showNodePreview(chatId, session.sourceUrl, userId, env, cache, {
                             sessionId: session.id,
-                            messageId
+                            messageId,
+                            filename: session.filename,
+                            sourceClashConfig: session.sourceClashConfig
                         });
                     } else if (session.sourceType === 'inline') {
-                        const subscriptions = await getCachedSubscriptions(env, cache);
-                        const subscription = subscriptions.find(item => item.id === session.savedSubscriptionId);
-                        if (!isInlineSubscription(subscription)) throw new Error('本地文件订阅不存在或已删除');
-                        session.name = subscription.name;
-                        session.nodeUrls = normalizeStoredNodeUrls(subscription.nodeUrls);
-                        session.userInfo = subscription.userInfo || null;
+                        if (session.savedSubscriptionId) {
+                            const subscriptions = await getCachedSubscriptions(env, cache);
+                            const subscription = subscriptions.find(item => item.id === session.savedSubscriptionId);
+                            if (!isInlineSubscription(subscription)) throw new Error('本地文件订阅不存在或已删除');
+                            session.name = subscription.name;
+                            session.nodeUrls = normalizeStoredNodeUrls(subscription.nodeUrls);
+                            session.userInfo = subscription.userInfo || null;
+                            session.sourceClashConfig = normalizeClashSourceConfig(subscription.sourceClashConfig);
+                        }
                         session.fetchedAt = Date.now();
                         await persistPreviewSession(env, storageAdapter, session);
                         await editTelegramMessage(chatId, messageId, buildPreviewCard(session), env, {
