@@ -1114,10 +1114,30 @@ function buildSubscriptionPreviewCard(session) {
     return message;
 }
 
-function formatNodePreviewValue(value) {
-    if (Array.isArray(value)) return value.join(', ');
-    if (value && typeof value === 'object') return JSON.stringify(value);
-    return String(value);
+function hasNodePreviewValue(value) {
+    if (value === undefined || value === null || value === '') return false;
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === 'object') {
+        return Object.values(value).some(hasNodePreviewValue);
+    }
+    return true;
+}
+
+function appendNodePreviewField(lines, key, value, indent = '  ', isFirst = false) {
+    if (!hasNodePreviewValue(value)) return;
+
+    const prefix = isFirst ? '- ' : indent;
+    const safeKey = escapeHtml(String(key));
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+        lines.push(`${prefix}${safeKey}:`);
+        for (const [childKey, childValue] of Object.entries(value)) {
+            appendNodePreviewField(lines, childKey, childValue, `${indent}  `);
+        }
+        return;
+    }
+
+    const rendered = Array.isArray(value) ? value.join(', ') : String(value);
+    lines.push(`${prefix}${safeKey}: ${escapeHtml(truncateTelegramText(rendered, 700))}`);
 }
 
 function buildNodePreviewCard(session) {
@@ -1133,11 +1153,25 @@ function buildNodePreviewCard(session) {
         ['cipher', proxy.cipher],
         ['alter-id', proxy.alterId ?? proxy['alter-id']],
         ['tls', proxy.tls],
-        ['network', proxy.network || 'tcp']
-    ].filter(([, value]) => value !== undefined && value !== null && value !== '');
-    const detailLines = fields.map(([key, value], index) => {
-        const prefix = index === 0 ? '- ' : '  ';
-        return `${prefix}${key}: ${escapeHtml(truncateTelegramText(formatNodePreviewValue(value), 700))}`;
+        ['network', proxy.network || 'tcp'],
+        ['flow', proxy.flow],
+        ['servername', proxy.servername || proxy.sni],
+        ['client-fingerprint', proxy['client-fingerprint']],
+        ['reality-opts', proxy['reality-opts']]
+    ].filter(([, value]) => hasNodePreviewValue(value));
+    const displayedKeys = new Set([
+        'name', 'server', 'port', 'type', 'uuid', 'password', 'cipher',
+        'alter-id', 'alterId', 'tls', 'network', 'flow', 'servername', 'sni',
+        'client-fingerprint', 'reality-opts', 'metadata'
+    ]);
+    for (const [key, value] of Object.entries(proxy)) {
+        if (!displayedKeys.has(key) && hasNodePreviewValue(value)) {
+            fields.push([key, value]);
+        }
+    }
+    const detailLines = [];
+    fields.forEach(([key, value], index) => {
+        appendNodePreviewField(detailLines, key, value, '  ', index === 0);
     });
 
     let message = `📋 <b>机场名称:</b> <code>${escapeHtml(truncateTelegramText(session.name || '未命名节点', 120))}</code>\n`;

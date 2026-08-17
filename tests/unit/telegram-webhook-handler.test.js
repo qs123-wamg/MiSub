@@ -726,6 +726,12 @@ describe('handleTelegramWebhook', () => {
     expect(card.text).toContain('uuid: 77777777-6666-8888-841f-1fe01760d842');
     expect(card.text).toContain('tls: true');
     expect(card.text).toContain('network: ws');
+    expect(card.text).toContain('servername: xray4.5671234.xyz');
+    expect(card.text).toContain('client-fingerprint: chrome');
+    expect(card.text).toContain('ws-opts:');
+    expect(card.text).toContain('path: /?ed=2560');
+    expect(card.text).toContain('headers:');
+    expect(card.text).toContain('Host: xray4.5671234.xyz');
     expect(card.text).not.toContain('sni: xray4.5671234.xyz');
 
     const buttons = card.reply_markup.inline_keyboard.flat();
@@ -785,6 +791,30 @@ describe('handleTelegramWebhook', () => {
 
     await invoke(buttons.find(button => button.callback_data.startsWith('sp_save_')).callback_data);
     expect(state.subscriptions).toHaveLength(1);
+  });
+  it('renders Reality parameters in the detailed single-node card', async () => {
+    const nodeUrl = 'vless://0c4a5f22-1c3a-4ce6-bbf4-012ec67707ad@38.47.120.48:29075?encryption=none&security=reality&pbk=NjURocQ5TRu0TAnVlRaqysXb7YggSgLimV9-3FlrGo&type=tcp&sni=one-piece.com&fp=chrome&flow=xtls-rprx-vision&sid=6ba85179e30d4fc2#%E9%A6%99%E6%B8%AF-01';
+    const { adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: nodeUrl,
+        chat: { id: 2115 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    const card = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(card.text).toContain('- name: 香港-01');
+    expect(card.text).toContain('flow: xtls-rprx-vision');
+    expect(card.text).toContain('servername: one-piece.com');
+    expect(card.text).toContain('client-fingerprint: chrome');
+    expect(card.text).toContain('reality-opts:');
+    expect(card.text).toContain('public-key: NjURocQ5TRu0TAnVlRaqysXb7YggSgLimV9-3FlrGo');
+    expect(card.text).toContain('short-id: 6ba85179e30d4fc2');
+    expect(card.text).not.toContain('sni: one-piece.com');
   });
   it('previews multiple direct nodes without automatically saving them', async () => {
     const nodeUrls = [
