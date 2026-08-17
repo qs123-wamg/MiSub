@@ -363,6 +363,125 @@ describe('handleTelegramWebhook', () => {
     expect(sentBodies.some(body => body.text?.includes('https://example.com/profiles/tg-'))).toBe(true);
   });
 
+  it('sends a summary and one TXT report when more than five subscription URLs are provided', async () => {
+    const urls = Array.from({ length: 6 }, (_, index) => `https://sub.example.com/batch-${index + 1}`);
+    const validNode = 'trojan://password@valid.example.com:443?security=tls#Valid-Node';
+    const depletedNode = 'vless://00000000-0000-4000-8000-000000000002@depleted.example.com:443?security=tls#Depleted-Node';
+    const expiredNode = 'vmess://eyJhZGQiOiJleHBpcmVkLmV4YW1wbGUuY29tIiwicG9ydCI6IjQ0MyIsImlkIjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAzIiwibmFtZSI6IkV4cGlyZWQtTm9kZSIsInBhdGgiOiIiLCJ0eXBlIjoibm9uZSIsInZhaWQiOjAsImhvc3QiOiIiLCJ0bHMiOiJ0bHMifQ==';
+    const unsupportedNode = 'ss://cmM0LW1kNTpwYXNzd29yZA==@legacy.example.com:443#Legacy-Node';
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      const value = String(url);
+      const index = urls.indexOf(value);
+      if (index === 0) {
+        return new Response(btoa(`${validNode}\n`), {
+          status: 200,
+          headers: { 'Content-Disposition': 'attachment; filename=Valid.yaml' }
+        });
+      }
+      if (index === 1) {
+        return new Response(btoa(`${depletedNode}\n`), {
+          status: 200,
+          headers: {
+            'Content-Disposition': 'attachment; filename=Depleted.yaml',
+            'subscription-userinfo': 'upload=100; download=0; total=100; expire=4102444800'
+          }
+        });
+      }
+      if (index === 2) {
+        return new Response(btoa(`${expiredNode}\n`), {
+          status: 200,
+          headers: {
+            'Content-Disposition': 'attachment; filename=Expired.yaml',
+            'subscription-userinfo': 'upload=0; download=0; total=100; expire=1'
+          }
+        });
+      }
+      if (index === 3) {
+        return new Response(btoa(`${unsupportedNode}\n`), {
+          status: 200,
+          headers: { 'Content-Disposition': 'attachment; filename=Unsupported.txt' }
+        });
+      }
+      if (index >= 4) return new Response('upstream error', { status: 503 });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: urls.join('\n'),
+        chat: { id: 2110 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    const messageBodies = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body));
+    expect(messageBodies[0].text).toContain('检测到 6 条链接，超过阈值，结果将以文件形式发送');
+    expect(messageBodies[1].text).toBe('查询统计: 有效: 1 | 耗尽: 1 | 过期: 1 | 失效: 3');
+
+    const documentCall = global.fetch.mock.calls.find(([url]) => String(url).includes('/sendDocument'));
+    expect(documentCall).toBeTruthy();
+    expect(documentCall[1].body.get('document').name).toBe('subscription-batch-results.txt');
+    const report = await documentCall[1].body.get('document').text();
+    expect(report).toContain('链接总数: 6');
+    expect(report).toContain('查询统计: 有效: 1 | 耗尽: 1 | 过期: 1 | 失效: 3');
+    expect(report).toContain(`订阅链接: ${urls[0]}`);
+    expect(report).toContain(validNode);
+    expect(report).toContain('状态: 耗尽');
+    expect(report).toContain('状态: 过期');
+    expect(report).toContain('状态: 失效');
+    expect(report).toContain('失败原因: 内容解析阶段失败：未识别到可用节点');
+    expect(report).not.toContain(unsupportedNode);
+  });
+
+  it('renders traffic metadata embedded in a Base64 subscription node fragment', async () => {
+    const subscriptionUrl = 'https://sub.example.com/content-userinfo';
+    const nodeUrl = 'vless://00000000-0000-4000-8000-000000000010@node.example.com:443?security=tls#Test-Node';
+    const metadataNode = `${nodeUrl.split('#')[0]}#${encodeURIComponent('Test-Node | 剩余流量：400.5 GB | 距离下次重置剩余：14 天 | 套餐到期：2027-03-23')}`;
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (url === subscriptionUrl) {
+        return new Response(encodeBase64Utf8(`${metadataNode}\n`), {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/html'
+          }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: subscriptionUrl,
+        chat: { id: 2111 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    const card = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(card.text).toContain('流量详情:</b> 剩余 400.5GB');
+    expect(card.text).toContain('使用进度:</b> 未知');
+    expect(card.text).toContain('剩余可用:</b> 400.5GB');
+    expect(card.text).toContain('过期时间:</b> 2027-03-23');
+    expect(card.text).toContain('剩余时间:</b>');
+    expect(card.text).toContain('下次重置:</b> 14天');
+    expect(card.text).toContain('节点总数:</b> 1');
+  });
+
   it('shows up to 50 subscription preview nodes and preserves the hidden-node count', async () => {
     const subscriptionUrl = 'https://sub.example.com/fifty-node-preview';
     const nodeUrls = Array.from({ length: 55 }, (_, index) => (

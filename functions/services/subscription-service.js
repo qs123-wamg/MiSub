@@ -76,6 +76,144 @@ export function parseSubscriptionUserInfoHeader(header) {
     return Object.keys(info).length > 0 ? info : null;
 }
 
+function decodeSubscriptionContentBase64(content) {
+    const text = String(content || '').trim();
+    if (text.length < 20 || /\s/.test(text) && !/^[A-Za-z0-9+/_=-\s]+$/.test(text)) return text;
+
+    const normalized = text.replace(/\s/g, '').replace(/-/g, '+').replace(/_/g, '/');
+    if (!/^[A-Za-z0-9+/=]+$/.test(normalized) || normalized.length < 20) return text;
+
+    try {
+        const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+        const binary = atob(padded);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index++) {
+            bytes[index] = binary.charCodeAt(index);
+        }
+        const decoded = new TextDecoder('utf-8').decode(bytes);
+        return /(?:ssr?|vmess|vless|trojan|hysteria|tuic|anytls|socks):\/\//i.test(decoded)
+            || /(?:剩余流量|套餐到期|到期时间|距离下次重置|remaining|traffic|expire)/i.test(decoded)
+            ? decoded
+            : text;
+    } catch {
+        return text;
+    }
+}
+
+function parseSubscriptionTrafficValue(value, unit) {
+    const multipliers = {
+        B: 1,
+        KB: 1024,
+        MB: 1024 ** 2,
+        GB: 1024 ** 3,
+        TB: 1024 ** 4,
+        PB: 1024 ** 5
+    };
+    const bytes = Number(value) * (multipliers[String(unit || 'B').toUpperCase()] || 1);
+    return Number.isFinite(bytes) && bytes >= 0 ? Math.round(bytes) : 0;
+}
+
+function parseSubscriptionDuration(value, unit) {
+    const multipliers = {
+        分钟: 60,
+        minute: 60,
+        minutes: 60,
+        小时: 3600,
+        hour: 3600,
+        hours: 3600,
+        天: 86400,
+        day: 86400,
+        days: 86400,
+        月: 2592000,
+        month: 2592000,
+        months: 2592000
+    };
+    const seconds = Number(value) * (multipliers[String(unit || '').toLowerCase()] || 0);
+    return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds) : 0;
+}
+
+function parseSubscriptionExpireValue(value) {
+    const expireText = String(value || '').trim();
+    if (!expireText) return 0;
+    if (/长期有效|永久|永不过期|unlimited|forever/i.test(expireText)) {
+        return Math.floor(new Date('2099-12-31T00:00:00+08:00').getTime() / 1000);
+    }
+
+    const timestamp = Number(expireText);
+    if (Number.isFinite(timestamp) && timestamp > 0) {
+        return timestamp > 10 ** 12 ? Math.floor(timestamp / 1000) : Math.floor(timestamp);
+    }
+
+    const dateMatch = expireText.match(/(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)/);
+    if (!dateMatch) return 0;
+    const date = new Date(dateMatch[1].replace(/\//g, '-').replace(' ', 'T'));
+    return Number.isFinite(date.getTime()) ? Math.floor(date.getTime() / 1000) : 0;
+}
+
+/**
+ * 从订阅正文中的伪节点名称提取流量、到期和重置信息。
+ * 一些机场不返回 subscription-userinfo 响应头，而是把元数据放在节点 URL fragment 中。
+ */
+export function parseSubscriptionUserInfoFromContent(content) {
+    const rawText = String(content || '').trim();
+    if (!rawText) return null;
+
+    const decodedText = decodeSubscriptionContentBase64(rawText);
+    const fragments = [];
+    for (const line of decodedText.split(/\r?\n/)) {
+        const hashIndex = line.indexOf('#');
+        if (hashIndex === -1) continue;
+        const fragment = line.slice(hashIndex + 1).trim();
+        if (!fragment) continue;
+        try {
+            fragments.push(decodeURIComponent(fragment));
+        } catch {
+            fragments.push(fragment);
+        }
+    }
+
+    const searchableText = [decodedText, ...fragments].join('\n');
+    const info = {
+        source: 'content',
+        trafficIsRemaining: false
+    };
+
+    const trafficPatterns = [
+        /(?:剩余流量|剩余|remaining|traffic)[：:\s]*([\d.]+)\s*(B|KB|MB|GB|TB|PB)\b/i
+    ];
+    for (const pattern of trafficPatterns) {
+        const match = searchableText.match(pattern);
+        if (!match) continue;
+        const remainingBytes = parseSubscriptionTrafficValue(match[1], match[2]);
+        if (remainingBytes > 0) {
+            info.total = remainingBytes;
+            info.upload = 0;
+            info.download = 0;
+            info.trafficIsRemaining = true;
+        }
+        break;
+    }
+
+    const resetMatch = searchableText.match(
+        /(?:距离下次重置剩余|下次重置剩余|reset(?:\s+in)?)[：:\s]*([\d.]+)\s*(分钟|小时|天|月|minutes?|hours?|days?|months?)(?=\s|$|[|,，])/i
+    );
+    if (resetMatch) {
+        const resetRemainingSeconds = parseSubscriptionDuration(resetMatch[1], resetMatch[2]);
+        if (resetRemainingSeconds > 0) info.resetRemainingSeconds = resetRemainingSeconds;
+    }
+
+    const expireMatch = searchableText.match(
+        /(?:套餐到期|到期时间|过期时间|expire(?:s)?)[：:\s]*(.+?)(?=\r?\n|$)/i
+    );
+    if (expireMatch) {
+        const expire = parseSubscriptionExpireValue(expireMatch[1]);
+        if (expire > 0) info.expire = expire;
+    }
+
+    const hasMetadata = info.trafficIsRemaining || info.resetRemainingSeconds > 0 || info.expire > 0;
+    return hasMetadata ? info : null;
+}
+
 /**
  * 构建单机场订阅源的保护性缓存 key
  */

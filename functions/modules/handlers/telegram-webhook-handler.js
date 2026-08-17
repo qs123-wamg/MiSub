@@ -29,7 +29,7 @@ import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS } from '../config.js';
 import { assertPublicNetworkUrl, redactUrl } from '../security-utils.js';
 import { extractValidNodes, parseNodeList } from '../utils/node-parser.js';
 import { getRegionEmoji } from '../utils/geo-utils.js';
-import { buildSubscriptionNodeCacheKey, isInlineSubscription, isRealProxyNode, isRemoteSubscription, isSubscriptionEntry, parseSubscriptionUserInfoHeader } from '../../services/subscription-service.js';
+import { buildSubscriptionNodeCacheKey, isInlineSubscription, isRealProxyNode, isRemoteSubscription, isSubscriptionEntry, parseSubscriptionUserInfoFromContent, parseSubscriptionUserInfoHeader } from '../../services/subscription-service.js';
 import { generateClashConfig, urlToClashProxy } from '../../utils/url-to-clash.js';
 import { extractClashSourceConfig, normalizeClashSourceConfig } from '../subscription/clash-source-config.js';
 const TELEGRAM_SUBSCRIPTION_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -43,6 +43,8 @@ const TELEGRAM_PREVIEW_MESSAGE_LIMIT = 3900;
 const TELEGRAM_SUBSCRIPTION_TIMEOUT_MS = 18000;
 const TELEGRAM_SUBSCRIPTION_LIST_PAGE_SIZE = 10;
 const TELEGRAM_SUBSCRIPTION_EXPIRING_DAYS = 30;
+const TELEGRAM_BATCH_SUBSCRIPTION_THRESHOLD = 5;
+const TELEGRAM_BATCH_SUBSCRIPTION_CONCURRENCY = 4;
 const TELEGRAM_IMPORT_FILE_EXTENSIONS = new Set(['.txt', '.yaml', '.yml', '.conf', '.json']);
 const TELEGRAM_EXTENSIONLESS_FILE_MIME_TYPES = new Set([
     'text/plain',
@@ -287,6 +289,100 @@ function formatTelegramFailureReason(error, maxLength = 1200) {
 function buildTelegramParseFailureMessage(title, error) {
     const reason = formatTelegramFailureReason(error);
     return `❌ <b>${escapeHtml(title)}</b>\n\n<b>失败原因:</b> ${escapeHtml(reason)}`;
+}
+
+function getBatchSubscriptionStatus(preview) {
+    const info = preview?.userInfo || {};
+    const expiry = getSubscriptionExpirySummary(info.expire);
+    if (expiry.expired) return '过期';
+
+    const total = normalizeTrafficBytes(info.total);
+    const used = normalizeTrafficBytes(info.upload) + normalizeTrafficBytes(info.download);
+    if (total > 0 && Math.max(0, total - used) <= 0) return '耗尽';
+    return '有效';
+}
+
+function summarizeBatchSubscriptionResults(results) {
+    return results.reduce((summary, result) => {
+        summary[result.status] = (summary[result.status] || 0) + 1;
+        return summary;
+    }, { 有效: 0, 耗尽: 0, 过期: 0, 失效: 0 });
+}
+
+async function fetchBatchSubscriptionPreviews(urls) {
+    const results = new Array(urls.length);
+    let nextIndex = 0;
+
+    const worker = async () => {
+        while (true) {
+            const index = nextIndex++;
+            if (index >= urls.length) return;
+            const url = urls[index];
+            try {
+                const preview = await fetchSubscriptionPreview(url);
+                const nodes = parseNodeList((preview.nodeUrls || []).join('\n'));
+                if (nodes.length === 0) throw new Error('内容解析阶段失败：未识别到可用节点');
+                results[index] = { url, preview, nodes, status: getBatchSubscriptionStatus(preview) };
+            } catch (error) {
+                results[index] = { url, error, status: '失效' };
+            }
+        }
+    };
+
+    const workerCount = Math.min(TELEGRAM_BATCH_SUBSCRIPTION_CONCURRENCY, urls.length);
+    await Promise.all(Array.from({ length: workerCount }, worker));
+    return results;
+}
+
+function buildBatchSubscriptionReport(results) {
+    const stats = summarizeBatchSubscriptionResults(results);
+
+    const lines = [
+        'MiSub 订阅解析结果',
+        `链接总数: ${results.length}`,
+        `查询统计: 有效: ${stats.有效} | 耗尽: ${stats.耗尽} | 过期: ${stats.过期} | 失效: ${stats.失效}`,
+        ''
+    ];
+
+    results.forEach((result, index) => {
+        lines.push(`========== 第 ${index + 1} 条订阅 ==========`);
+        lines.push(`状态: ${result.status}`);
+        lines.push(`订阅链接: ${result.url}`);
+
+        if (result.preview) {
+            const preview = result.preview;
+            const info = preview.userInfo || {};
+            const nodes = result.nodes || [];
+            const traffic = getSubscriptionTrafficDisplay(info, formatTrafficBytes);
+
+            lines.push(`机场名称: ${preview.name || '未命名订阅'}`);
+            lines.push(`节点总数: ${nodes.length}`);
+            if (hasSubscriptionInfo(info)) {
+                lines.push(`流量详情: ${traffic.trafficText}`);
+                lines.push(`使用进度: ${traffic.usagePercent === null ? '未知' : `${traffic.usagePercent.toFixed(1)}%`}`);
+                lines.push(`剩余可用: ${traffic.remainingText}`);
+            }
+            lines.push(`过期时间: ${formatExpiryDate(info.expire)}`);
+            lines.push(`剩余时间: ${formatRemainingTime(info.expire)}`);
+            if (Number(info.resetRemainingSeconds || 0) > 0) {
+                lines.push(`下次重置: ${formatResetRemainingTime(info.resetRemainingSeconds)}`);
+            }
+            lines.push('节点列表:');
+            if (nodes.length === 0) {
+                lines.push('暂无节点');
+            } else {
+                nodes.forEach((node, nodeIndex) => {
+                    lines.push(`${nodeIndex + 1}. ${node.name || extractNodeName(node.url)} | ${node.url}`);
+                });
+            }
+        } else {
+            lines.push(`失败原因: ${formatTelegramFailureReason(result.error)}`);
+        }
+
+        lines.push('');
+    });
+
+    return lines.join('\n');
 }
 
 /**
@@ -641,7 +737,8 @@ async function fetchSubscriptionPreview(url, options = {}) {
             name: getSubscriptionDisplayName(filename, currentUrl),
             nodeUrls,
             sourceClashConfig: extractClashSourceConfig(content),
-            userInfo: parseSubscriptionUserInfoHeader(response.headers.get('subscription-userinfo')),
+            userInfo: parseSubscriptionUserInfoHeader(response.headers.get('subscription-userinfo'))
+                || parseSubscriptionUserInfoFromContent(content),
             userAgent,
             usedFallbackUserAgent,
             fetchedAt: Date.now()
@@ -723,6 +820,46 @@ function formatRemainingTime(expireSeconds) {
     const hours = totalHours % 24;
     const minutes = Math.floor((remainingMs % 3600000) / 60000);
     return `${days}天${hours}小时${minutes}分钟`;
+}
+
+function formatResetRemainingTime(seconds) {
+    const totalMinutes = Math.floor(Number(seconds || 0) / 60);
+    if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) return '未知';
+    const days = Math.floor(totalMinutes / 1440);
+    const hours = Math.floor((totalMinutes % 1440) / 60);
+    const minutes = totalMinutes % 60;
+    if (days > 0 && hours === 0 && minutes === 0) return `${days}天`;
+    if (days > 0) return `${days}天${hours}小时${minutes}分钟`;
+    if (hours > 0 && minutes === 0) return `${hours}小时`;
+    if (hours > 0) return `${hours}小时${minutes}分钟`;
+    return `${minutes}分钟`;
+}
+
+function hasSubscriptionInfo(info) {
+    return normalizeTrafficBytes(info?.total) > 0
+        || Number(info?.expire || 0) > 0
+        || Number(info?.resetRemainingSeconds || 0) > 0
+        || info?.source === 'content';
+}
+
+function getSubscriptionTrafficDisplay(info, format = formatTrafficBytes) {
+    const upload = normalizeTrafficBytes(info?.upload);
+    const download = normalizeTrafficBytes(info?.download);
+    const total = normalizeTrafficBytes(info?.total);
+    const used = upload + download;
+    const remaining = Math.max(0, total - used);
+    const remainingOnly = info?.trafficIsRemaining === true;
+
+    return {
+        total,
+        used,
+        remaining,
+        usagePercent: total > 0 && !remainingOnly ? Math.min(100, (used / total) * 100) : null,
+        trafficText: remainingOnly
+            ? `剩余 ${format(remaining)}`
+            : `${format(used)} / ${format(total)}`,
+        remainingText: format(remaining)
+    };
 }
 
 function formatSubscriptionListTraffic(value) {
@@ -865,12 +1002,7 @@ function buildSubscriptionPreviewCard(session) {
     const protocols = [...new Set(nodes.map(node => node.protocol).filter(Boolean))];
     const regions = [...new Set(nodes.map(node => node.region).filter(region => region && region !== '其他'))];
     const info = session.userInfo || {};
-    const upload = normalizeTrafficBytes(info.upload);
-    const download = normalizeTrafficBytes(info.download);
-    const total = normalizeTrafficBytes(info.total);
-    const used = upload + download;
-    const remaining = Math.max(0, total - used);
-    const usagePercent = total > 0 ? Math.min(100, (used / total) * 100) : 0;
+    const traffic = getSubscriptionTrafficDisplay(info);
     const expire = Number(info.expire || 0);
     const status = Number.isFinite(expire) && expire > 0 && expire * 1000 <= Date.now()
         ? '🔴 已到期'
@@ -886,12 +1018,19 @@ function buildSubscriptionPreviewCard(session) {
 
     let message = `📋 <b>机场名称:</b> <code>${escapeHtml(displayName)}</code>\n`;
     message += `🔗 <b>订阅链接:</b> ${sourceLink}\n`;
-    if (total > 0) {
-        message += `<blockquote>📊 <b>流量详情:</b> ${formatTrafficBytes(used)} / ${formatTrafficBytes(total)} ${status}\n`;
-        message += `📈 <b>使用进度:</b> ${buildUsageProgress(usagePercent)} ${usagePercent.toFixed(1)}%\n`;
-        message += `💵 <b>剩余可用:</b> ${formatTrafficBytes(remaining)}\n`;
+    if (hasSubscriptionInfo(info)) {
+        const progressText = traffic.usagePercent === null
+            ? '未知'
+            : `${buildUsageProgress(traffic.usagePercent)} ${traffic.usagePercent.toFixed(1)}%`;
+        message += `<blockquote>📊 <b>流量详情:</b> ${escapeHtml(traffic.trafficText)} ${status}\n`;
+        message += `📈 <b>使用进度:</b> ${progressText}\n`;
+        message += `💵 <b>剩余可用:</b> ${escapeHtml(traffic.remainingText)}\n`;
         message += `⌛ <b>过期时间:</b> ${formatExpiryDate(info.expire)}\n`;
-        message += `⌛ <b>剩余时间:</b> ${formatRemainingTime(info.expire)}</blockquote>\n`;
+        message += `⌛ <b>剩余时间:</b> ${formatRemainingTime(info.expire)}`;
+        if (Number(info.resetRemainingSeconds || 0) > 0) {
+            message += `\n🔄 <b>下次重置:</b> ${formatResetRemainingTime(info.resetRemainingSeconds)}`;
+        }
+        message += '</blockquote>\n';
     }
     message += `<blockquote>🔌 <b>协议类型:</b> ${escapeHtml(protocols.join('、') || '未识别')}\n`;
     message += `📊 <b>节点总数:</b> ${nodes.length} | <b>国家/地区数:</b> ${regions.length}\n`;
@@ -1000,12 +1139,7 @@ function buildStoredSubscriptionDetailCard(session) {
     const nodes = getPreviewNodes(session);
     const nodeCount = Math.max(nodes.length, Number(session.storedNodeCount || 0));
     const info = session.userInfo || {};
-    const upload = normalizeTrafficBytes(info.upload);
-    const download = normalizeTrafficBytes(info.download);
-    const total = normalizeTrafficBytes(info.total);
-    const used = upload + download;
-    const remaining = Math.max(0, total - used);
-    const usagePercent = total > 0 ? Math.min(100, (used / total) * 100) : 0;
+    const traffic = getSubscriptionTrafficDisplay(info, formatSubscriptionListTraffic);
     const sourceUrl = session.isRemote
         ? truncateTelegramText(session.sourceUrl, 360)
         : '本地内嵌订阅';
@@ -1015,12 +1149,19 @@ function buildStoredSubscriptionDetailCard(session) {
     message += `<b>配置名称:</b> <code>${escapeHtml(name)}</code>\n`;
     message += `<b>订阅来源:</b>\n<code>${escapeHtml(sourceUrl)}</code>\n`;
 
-    if (total > 0) {
-        message += `<blockquote><b>流量详情:</b> ${formatSubscriptionListTraffic(used)} / ${formatSubscriptionListTraffic(total)}\n`;
-        message += `<b>使用进度:</b> ${buildUsageProgress(usagePercent)} ${usagePercent.toFixed(1)}%\n`;
-        message += `<b>剩余可用:</b> ${formatSubscriptionListTraffic(remaining)}\n`;
+    if (hasSubscriptionInfo(info)) {
+        const progressText = traffic.usagePercent === null
+            ? '未知'
+            : `${buildUsageProgress(traffic.usagePercent)} ${traffic.usagePercent.toFixed(1)}%`;
+        message += `<blockquote><b>流量详情:</b> ${escapeHtml(traffic.trafficText)}\n`;
+        message += `<b>使用进度:</b> ${progressText}\n`;
+        message += `<b>剩余可用:</b> ${escapeHtml(traffic.remainingText)}\n`;
         message += `<b>过期时间:</b> ${formatExpiryDate(info.expire)}\n`;
-        message += `<b>剩余时间:</b> ${formatRemainingTime(info.expire)}</blockquote>\n`;
+        message += `<b>剩余时间:</b> ${formatRemainingTime(info.expire)}`;
+        if (Number(info.resetRemainingSeconds || 0) > 0) {
+            message += `\n<b>下次重置:</b> ${formatResetRemainingTime(info.resetRemainingSeconds)}`;
+        }
+        message += '</blockquote>\n';
     }
 
     let nodeLines = nodes.slice(0, TELEGRAM_SUBSCRIPTION_DETAIL_NODE_LIMIT).map((node, index) => (
@@ -3149,16 +3290,41 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
         // HTTP/HTTPS 订阅先展示解析卡片，由按钮决定是否保存。
         const httpUrls = extractHttpUrls(text);
         if (httpUrls.length > 0 && !options.skipSubscriptionPreview && !options.forceInline) {
-            for (const url of httpUrls) {
-                try {
-                    await showSubscriptionPreview(chatId, url, userId, env, cache);
-                } catch (error) {
-                    await sendTelegramMessage(
-                        chatId,
-                        buildTelegramParseFailureMessage('订阅解析失败', error),
-                        env,
-                        { requestCache: cache }
-                    );
+            if (httpUrls.length > TELEGRAM_BATCH_SUBSCRIPTION_THRESHOLD) {
+                await sendTelegramMessage(
+                    chatId,
+                    `检测到 ${httpUrls.length} 条链接，超过阈值，结果将以文件形式发送。`,
+                    env,
+                    { requestCache: cache }
+                );
+
+                const batchResults = await fetchBatchSubscriptionPreviews(httpUrls);
+                const stats = summarizeBatchSubscriptionResults(batchResults);
+                await sendTelegramMessage(
+                    chatId,
+                    `查询统计: 有效: ${stats.有效} | 耗尽: ${stats.耗尽} | 过期: ${stats.过期} | 失效: ${stats.失效}`,
+                    env,
+                    { requestCache: cache }
+                );
+                await sendTelegramDocument(
+                    chatId,
+                    'subscription-batch-results.txt',
+                    buildBatchSubscriptionReport(batchResults),
+                    env,
+                    `${httpUrls.length} 条订阅解析结果`
+                );
+            } else {
+                for (const url of httpUrls) {
+                    try {
+                        await showSubscriptionPreview(chatId, url, userId, env, cache);
+                    } catch (error) {
+                        await sendTelegramMessage(
+                            chatId,
+                            buildTelegramParseFailureMessage('订阅解析失败', error),
+                            env,
+                            { requestCache: cache }
+                        );
+                    }
                 }
             }
 
