@@ -2262,8 +2262,28 @@ describe('handleTelegramWebhook', () => {
       callback_data: 'node_action_node_1'
     });
     expect(firstPageRows.flat()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ text: '➡️', callback_data: 'list_page_node_1' })
+      expect.objectContaining({ text: '➡️', callback_data: 'list_page_node_1' }),
+      expect.objectContaining({ text: '🔢 跳转页码', callback_data: 'prompt_node_page' })
     ]));
+
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'prompt-node-page',
+        data: 'prompt_node_page',
+        from: { id: 1 },
+        message: { message_id: 95, chat: { id: 4004 } }
+      }
+    }), { MISUB_KV: null });
+
+    const promptBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/answerCallbackQuery'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(promptBody).toMatchObject({
+      callback_query_id: 'prompt-node-page',
+      text: '请发送 /list node 页码',
+      show_alert: true
+    });
 
     await handleTelegramWebhook(createRequest({
       callback_query: {
@@ -2297,11 +2317,60 @@ describe('handleTelegramWebhook', () => {
       .filter(([url]) => String(url).includes('/editMessageText'))
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
-    expect(detailBody.text).toContain('节点 #7');
-    expect(detailBody.text).toContain('名称: Node 7');
-    expect(detailBody.reply_markup.inline_keyboard.flat()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ text: '◀️ 返回列表', callback_data: 'cmd_list_node' })
+    expect(detailBody.text).toContain('机场名称:</b> <code>Node 7</code>');
+    expect(detailBody.text).toContain('来源类型:</b> 节点链接');
+    expect(detailBody.text).toContain('流量详情:</b> 未知');
+    expect(detailBody.text).toContain('过期时间:</b> 长期有效');
+    expect(detailBody.text).toContain('- name: Node-7');
+    expect(detailBody.text).toContain('server: example7.com');
+    const detailButtons = detailBody.reply_markup.inline_keyboard.flat();
+    expect(detailButtons.map(button => button.text)).toEqual([
+      '🔄 刷新订阅信息', '📄 显示全部节点',
+      '📥 导出Base64', '📥 导出YAML',
+      '🔗 生成短链', '✅ 已保存订阅',
+      '⬅️ 返回节点列表'
+    ]);
+    expect(detailButtons).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: '⬅️ 返回节点列表', callback_data: 'list_page_node_1' })
     ]));
+
+    const refreshCallback = detailButtons.find(button => button.text === '🔄 刷新订阅信息').callback_data;
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'refresh-node-7',
+        data: refreshCallback,
+        from: { id: 1 },
+        message: { message_id: 95, chat: { id: 4004 } }
+      }
+    }), { MISUB_KV: null });
+
+    const refreshedDetailBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(refreshedDetailBody.text).toContain('机场名称:</b> <code>Node 7</code>');
+    expect(refreshedDetailBody.reply_markup.inline_keyboard.flat()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: '⬅️ 返回节点列表', callback_data: 'list_page_node_1' })
+    ]));
+
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'return-node-list-page-2',
+        data: 'list_page_node_1',
+        from: { id: 1 },
+        message: { message_id: 95, chat: { id: 4004 } }
+      }
+    }), { MISUB_KV: null });
+
+    const returnedListBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(returnedListBody.text).toContain('节点列表 共7个 | 第2/2页');
+    expect(returnedListBody.reply_markup.inline_keyboard[0][0]).toMatchObject({
+      text: '✅ #7 Node 7 [VLESS]',
+      callback_data: 'node_action_node_6'
+    });
   });
 
   it('refreshes all enabled airport subscriptions and redraws the current list page', async () => {

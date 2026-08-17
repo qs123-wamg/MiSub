@@ -1162,21 +1162,25 @@ function buildPreviewCard(session) {
 
 function buildSubscriptionPreviewKeyboard(session) {
     const exportIcon = session?.sourceType === 'node' ? '📥' : '📤';
-    return {
-        inline_keyboard: [
-            [
-                { text: '🔄 刷新订阅信息', callback_data: `sp_refresh_${session.id}` },
-                { text: '📄 显示全部节点', callback_data: `sp_all_${session.id}` }
-            ],
-            [
-                { text: `${exportIcon} 导出Base64`, callback_data: `sp_b64_${session.id}` },
-                { text: `${exportIcon} 导出YAML`, callback_data: `sp_yaml_${session.id}` }
-            ],
-            [
-                { text: '🔗 生成短链', callback_data: `sp_link_${session.id}` },
-                { text: session.savedSubscriptionId ? '✅ 已保存订阅' : '💾 保存订阅', callback_data: `sp_save_${session.id}` }
-            ]
+    const rows = [
+        [
+            { text: '🔄 刷新订阅信息', callback_data: `sp_refresh_${session.id}` },
+            { text: '📄 显示全部节点', callback_data: `sp_all_${session.id}` }
+        ],
+        [
+            { text: `${exportIcon} 导出Base64`, callback_data: `sp_b64_${session.id}` },
+            { text: `${exportIcon} 导出YAML`, callback_data: `sp_yaml_${session.id}` }
+        ],
+        [
+            { text: '🔗 生成短链', callback_data: `sp_link_${session.id}` },
+            { text: session.savedSubscriptionId ? '✅ 已保存订阅' : '💾 保存订阅', callback_data: `sp_save_${session.id}` }
         ]
+    ];
+    if (Number.isInteger(session?.nodeListPage)) {
+        rows.push([{ text: '⬅️ 返回节点列表', callback_data: `list_page_node_${session.nodeListPage}` }]);
+    }
+    return {
+        inline_keyboard: rows
     };
 }
 
@@ -1511,8 +1515,10 @@ async function showNodePreview(chatId, nodeUrl, userId, env, requestCache = null
         !isSubscriptionEntry(item) && item.url === parsedNode.url
     ));
     const session = createNodePreviewSession(parsedNode.url, userId, savedNode, options.sessionId);
+    if (options.name) session.name = String(options.name).trim() || session.name;
     if (options.filename) session.filename = String(options.filename).trim() || session.filename;
     session.sourceClashConfig = normalizeClashSourceConfig(options.sourceClashConfig);
+    if (Number.isInteger(options.nodeListPage)) session.nodeListPage = Math.max(0, options.nodeListPage);
     await persistPreviewSession(env, storageAdapter, session);
 
     const message = buildNodePreviewCard(session);
@@ -2407,6 +2413,7 @@ async function handleListCommand(chatId, userId, env, page = 0, type = 'all', me
             inline_keyboard: [
                 ...nodeRows,
                 navButtons,
+                [{ text: '🔢 跳转页码', callback_data: 'prompt_node_page' }],
                 backButtonRow
             ]
         };
@@ -4046,8 +4053,10 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                         await showNodePreview(chatId, session.sourceUrl, userId, env, cache, {
                             sessionId: session.id,
                             messageId,
+                            name: session.name,
                             filename: session.filename,
-                            sourceClashConfig: session.sourceClashConfig
+                            sourceClashConfig: session.sourceClashConfig,
+                            nodeListPage: session.nodeListPage
                         });
                     } else if (session.sourceType === 'inline') {
                         if (session.savedSubscriptionId) {
@@ -4158,6 +4167,11 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
 
         if (data === 'prompt_sub_page') {
             await answerCallbackQuery(callbackQuery.id, '请发送 /list sub 页码', env, true);
+            return createJsonResponse({ ok: true });
+        }
+
+        if (data === 'prompt_node_page') {
+            await answerCallbackQuery(callbackQuery.id, '请发送 /list node 页码', env, true);
             return createJsonResponse({ ok: true });
         }
 
@@ -4354,112 +4368,21 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                         return createJsonResponse({ ok: true });
                     }
 
-                    const storageAdapter = await getStorageAdapter(env);
-
-                    // 获取对应列表
-                    // 获取对应列表
-                    let fullList = await getUserNodes(userId, env);
-                    let targetList = [];
-
-                    if (type === 'sub') {
-                        // Must match handleListCommand's filtering logic for 'sub'
-                        targetList = fullList.filter(isSubscriptionEntry);
-                    } else {
-                        // Must match handleListCommand's filtering logic for 'node'
-                        targetList = fullList.filter(n => !isSubscriptionEntry(n));
-                    }
-
-                    let actionIdx = idx;
-                    if ((idx < 0 || idx >= targetList.length) && fullList[idx]) {
-                        const fallbackItem = fullList[idx];
-                        const fallbackIsSub = isSubscriptionEntry(fallbackItem);
-                        if ((type === 'sub' && fallbackIsSub) || (type === 'node' && !fallbackIsSub)) {
-                            actionIdx = targetList.findIndex(item => (
-                                fallbackItem.id
-                                    ? item.id === fallbackItem.id
-                                    : item === fallbackItem || item.url === fallbackItem.url
-                            ));
-                            targetList = fullList;
-                        }
-                    }
-
-                    const profiles = await storageAdapter.getAllProfiles();
-                    const settings = await storageAdapter.get(KV_KEY_SETTINGS) || {};
-                    const config = settings.telegram_push_config || {};
-
+                    const fullList = await getUserNodes(userId, env);
+                    const targetList = fullList.filter(item => !isSubscriptionEntry(item));
                     if (idx < 0 || idx >= targetList.length) {
                         await answerCallbackQuery(callbackQuery.id, '对象不存在', env, true);
                         return createJsonResponse({ ok: true });
                     }
 
                     const node = targetList[idx];
-                    const boundProfileId = getUserBoundProfileId(config, userId);
-        const boundProfile = boundProfileId
-            ? profiles.find(p => p.id === boundProfileId)
-            : null;
-
-                    // Note: Manual nodes use 'id', subscriptions might not have 'id' in the same way or logic might differ.
-                    // Subscriptions usually have 'id' too.
-                    let isInProfile = false;
-                    if (boundProfile) {
-                        if (type === 'sub') {
-                            isInProfile = (boundProfile.subscriptions || []).includes(node.id);
-                        } else {
-                            isInProfile = (boundProfile.manualNodes || []).includes(node.id);
-                        }
-                    }
-
-                    const protocol = (node.url || '').split('://')[0].toUpperCase();
-                    const typeLabel = type === 'sub' ? '订阅' : '节点';
-
-                    let message = `📋 <b>${typeLabel} #${idx + 1}</b>\n\n`;
-                    message += `名称: ${escapeHtml(node.name || '未命名')}\n`;
-                    message += `协议: ${protocol}\n`;
-                    message += `状态: ${node.enabled ? '✅ 启用' : '⛔ 禁用'}\n`;
-
-                    if (boundProfile) {
-                        message += `订阅组: ${isInProfile ? '🔗 已关联' : '未关联'}\n`;
-                    }
-
-                    // 构建操作按钮
-                    const buttons = [];
-
-                    // 第一行：启用/禁用，复制
-                    const toggleCmd = type === 'sub' ? `toggle_sub_${actionIdx}` : `toggle_node_${actionIdx}`;
-                    const copyCmd = type === 'sub' ? `copy_sub_${actionIdx}` : `copy_node_${actionIdx}`;
-
-                    buttons.push([
-                        { text: node.enabled ? '⛔ 禁用' : '✅ 启用', callback_data: toggleCmd },
-                        { text: '📋 复制', callback_data: copyCmd }
-                    ]);
-
-                    // 如果有绑定的订阅组，添加关联/取消关联按钮
-                    if (boundProfile) {
-                        const linkCmd = type === 'sub' ? `link_sub_${actionIdx}` : `link_node_${actionIdx}`;
-                        const unlinkCmd = type === 'sub' ? `unlink_sub_${actionIdx}` : `unlink_node_${actionIdx}`;
-                        buttons.push([{
-                            text: isInProfile ? '➖ 从订阅组移除' : '➕ 添加到订阅组',
-                            callback_data: isInProfile ? unlinkCmd : linkCmd
-                        }]);
-                    }
-
-                    // 第二行：重命名，删除
-                    const renameCmd = type === 'sub' ? `prompt_rename_sub_${actionIdx}` : `prompt_rename_node_${actionIdx}`;
-                    const deleteCmd = type === 'sub' ? `confirm_delete_sub_${actionIdx}` : `confirm_delete_node_${actionIdx}`;
-
-                    buttons.push([
-                        { text: '✏️ 重命名', callback_data: renameCmd },
-                        { text: '🗑️ 删除', callback_data: deleteCmd }
-                    ]);
-
-                    // 返回列表
-                    const listCmd = type === 'sub' ? 'cmd_list_sub' : 'cmd_list_node';
-                    buttons.push([{ text: '◀️ 返回列表', callback_data: listCmd }]);
-
                     await answerCallbackQuery(callbackQuery.id, '', env);
-                    await editTelegramMessage(chatId, messageId, message, env, {
-                        reply_markup: { inline_keyboard: buttons }
+                    await showNodePreview(chatId, node.url, userId, env, requestCache, {
+                        messageId,
+                        name: node.name,
+                        nodeListPage: Math.floor(idx / 6)
                     });
+                    return createJsonResponse({ ok: true });
 
                 } else if (data.startsWith('sub_detail_')) {
                     const idxStr = data.replace('sub_detail_', '');
