@@ -1882,6 +1882,44 @@ describe('handleTelegramWebhook', () => {
     expect(body.text).toContain('TXT、YAML、YML、CONF、JSON');
   });
 
+  it('configures the Telegram command menu when /start is used', async () => {
+    const { adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: '/start',
+        chat: { id: 3002 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(global.fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      'https://api.telegram.org/botbot-token/setMyCommands',
+      'https://api.telegram.org/botbot-token/setChatMenuButton',
+      'https://api.telegram.org/botbot-token/sendMessage'
+    ]);
+
+    const commandsBody = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(commandsBody).toEqual({
+      commands: [
+        { command: 'start', description: '开始使用 MiSub' },
+        { command: 'help', description: '查看帮助' },
+        { command: 'list', description: '查看节点和订阅列表' }
+      ]
+    });
+
+    const menuBody = JSON.parse(global.fetch.mock.calls[1][1].body);
+    expect(menuBody).toEqual({
+      chat_id: 3002,
+      menu_button: { type: 'commands' }
+    });
+
+    const messageBody = JSON.parse(global.fetch.mock.calls[2][1].body);
+    expect(messageBody.text).toContain('欢迎使用 MiSub Telegram Bot');
+  });
+
   it('shows separate Telegram list entry points instead of mixing manual nodes and airport subscriptions', async () => {
     const { adapter } = createState({
       subscriptions: [

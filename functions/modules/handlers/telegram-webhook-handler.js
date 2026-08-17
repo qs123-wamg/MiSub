@@ -46,6 +46,11 @@ const TELEGRAM_SUBSCRIPTION_EXPIRING_DAYS = 30;
 const TELEGRAM_BATCH_SUBSCRIPTION_THRESHOLD = 5;
 const TELEGRAM_BATCH_SUBSCRIPTION_CONCURRENCY = 4;
 const TELEGRAM_IMPORT_FILE_EXTENSIONS = new Set(['.txt', '.yaml', '.yml', '.conf', '.json']);
+const TELEGRAM_COMMAND_MENU = [
+    { command: 'start', description: '开始使用 MiSub' },
+    { command: 'help', description: '查看帮助' },
+    { command: 'list', description: '查看节点和订阅列表' }
+];
 const TELEGRAM_EXTENSIONLESS_FILE_MIME_TYPES = new Set([
     'text/plain',
     'text/html',
@@ -75,6 +80,7 @@ function createRequestCache() {
         subscriptions: undefined,
         profiles: undefined,
         telegramPushConfig: undefined,
+        telegramCommandMenuConfigured: false
     };
 }
 
@@ -1649,6 +1655,50 @@ function parseTargetArgs(args) {
 // ==================== Telegram API ====================
 
 /**
+ * 配置 Telegram 左下角的命令菜单。
+ *
+ * setMyCommands 负责命令列表，setChatMenuButton 负责将当前会话的菜单
+ * 按钮固定为命令菜单。配置失败不应阻断 /start 的正常欢迎消息。
+ */
+async function ensureTelegramCommandMenu(chatId, env, requestCache = null) {
+    const cache = requestCache || createRequestCache();
+    if (cache.telegramCommandMenuConfigured) return;
+    cache.telegramCommandMenuConfigured = true;
+
+    try {
+        const config = await getTelegramPushConfig(env, cache);
+        if (!config.bot_token) {
+            console.error('[Telegram Push] Bot token not configured');
+            return;
+        }
+
+        const apiBase = `https://api.telegram.org/bot${config.bot_token}`;
+        const commandsResponse = await fetch(`${apiBase}/setMyCommands`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ commands: TELEGRAM_COMMAND_MENU })
+        });
+        if (!commandsResponse.ok) {
+            console.error('[Telegram Push] Failed to configure bot commands:', await commandsResponse.clone().text());
+        }
+
+        const menuResponse = await fetch(`${apiBase}/setChatMenuButton`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: chatId,
+                menu_button: { type: 'commands' }
+            })
+        });
+        if (!menuResponse.ok) {
+            console.error('[Telegram Push] Failed to configure chat menu button:', await menuResponse.clone().text());
+        }
+    } catch (error) {
+        console.error('[Telegram Push] Error configuring command menu:', error);
+    }
+}
+
+/**
  * 发送 Telegram 消息
  */
 async function sendTelegramMessage(chatId, text, env, options = {}) {
@@ -1925,7 +1975,8 @@ async function getNodesWithMapping(userId, env) {
 /**
  * 处理 /start 命令
  */
-async function handleStartCommand(chatId, env) {
+async function handleStartCommand(chatId, env, requestCache = null) {
+    await ensureTelegramCommandMenu(chatId, env, requestCache);
     const message =
         '👋 <b>欢迎使用 MiSub Telegram Bot！</b>\n\n' +
         '通过这个 Bot，你可以：\n' +
@@ -3605,7 +3656,7 @@ async function handleCommand(chatId, text, userId, env, request, requestCache = 
 
     switch (command) {
         case '/start':
-            await handleStartCommand(chatId, env);
+            await handleStartCommand(chatId, env, requestCache);
             break;
 
         case '/help':
