@@ -840,6 +840,7 @@ describe('handleTelegramWebhook', () => {
     expect(card.text).toContain('本地文件 · 笔记 2026年7月27日 18_12_58.txt');
     expect(card.text).toContain('协议类型:');
     expect(card.text).toContain('节点总数: 2');
+    expect(card.text).toContain('节点范围: 🇹🇭泰国,🇸🇬新加坡');
     expect(card.text).toContain('节点列表 (共 2 个)');
     const buttons = card.reply_markup.inline_keyboard.flat();
     expect(buttons).toHaveLength(6);

@@ -1033,7 +1033,7 @@ function buildSubscriptionPreviewCard(session) {
     const status = Number.isFinite(expire) && expire > 0 && expire * 1000 <= Date.now()
         ? '🔴 已到期'
         : '🟢 正常';
-    const regionText = regions.slice(0, 10).map(region => `${getRegionEmoji(region)}${region}`).join('、') || '未识别';
+    const regionText = regions.slice(0, 10).map(region => `${getRegionEmoji(region)}${region}`).join(',') || '未识别';
 
     const displayName = truncateTelegramText(session.name, 100);
     const isInline = session.sourceType === 'inline' || String(session.sourceUrl || '').startsWith('inline:');
