@@ -36,6 +36,8 @@ const TELEGRAM_SUBSCRIPTION_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x
 const TELEGRAM_SUBSCRIPTION_FALLBACK_USER_AGENT = 'clash-verge/v2.4.3';
 const TELEGRAM_SUBSCRIPTION_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const TELEGRAM_PREVIEW_SESSION_PREFIX = 'tg_subscription_preview:';
+const TELEGRAM_PAGE_PROMPT_PREFIX = 'tg_page_prompt:';
+const TELEGRAM_PAGE_PROMPT_TTL_MS = 5 * 60 * 1000;
 const TELEGRAM_PREVIEW_NODE_LIMIT = 50;
 const TELEGRAM_SUBSCRIPTION_DETAIL_NODE_LIMIT = 50;
 const TELEGRAM_PREVIEW_URL_DISPLAY_LIMIT = 240;
@@ -93,6 +95,31 @@ async function getCachedStorageAdapter(env, cache) {
         cache.storageAdapter = await getStorageAdapter(env);
     }
     return cache.storageAdapter;
+}
+
+function buildTelegramPagePromptKey(chatId, userId) {
+    return `${TELEGRAM_PAGE_PROMPT_PREFIX}${chatId}:${userId}`;
+}
+
+async function saveTelegramPagePrompt(env, cache, chatId, userId, type, messageId) {
+    const storageAdapter = await getCachedStorageAdapter(env, cache);
+    await storageAdapter.put(buildTelegramPagePromptKey(chatId, userId), {
+        type,
+        messageId,
+        expiresAt: Date.now() + TELEGRAM_PAGE_PROMPT_TTL_MS
+    });
+}
+
+async function readTelegramPagePrompt(env, cache, chatId, userId) {
+    const storageAdapter = await getCachedStorageAdapter(env, cache);
+    const key = buildTelegramPagePromptKey(chatId, userId);
+    const prompt = await storageAdapter.get(key);
+    if (!prompt) return null;
+    if (Number(prompt.expiresAt || 0) <= Date.now()) {
+        await storageAdapter.delete(key).catch(() => {});
+        return null;
+    }
+    return { key, storageAdapter, prompt };
 }
 
 async function getCachedSettings(env, cache) {
@@ -1300,21 +1327,18 @@ function buildStoredSubscriptionDetailCard(session) {
 }
 
 function buildStoredSubscriptionDetailKeyboard(session) {
-    const copyableName = truncateTelegramText(session.name || '未命名订阅', 120);
-    const firstRow = session.isRemote
-        ? [
-            { text: '🔄 刷新订阅', callback_data: `sd_refresh_${session.id}` },
-            { text: '🗑️ 删除订阅', callback_data: `sd_delete_${session.id}` }
-        ]
-        : [{ text: '🗑️ 删除订阅', callback_data: `sd_delete_${session.id}` }];
     return {
         inline_keyboard: [
-            firstRow,
             [
-                { text: '📋 复制配置名称', copy_text: { text: copyableName } }
+                { text: '🔄 刷新订阅', callback_data: `sd_refresh_${session.id}` },
+                { text: '🗑️ 删除订阅', callback_data: `sd_delete_${session.id}` }
             ],
             [
-                { text: '📦 导出节点', callback_data: `sd_export_${session.id}` },
+                { text: '📥 导出Base64', callback_data: `sd_b64_${session.id}` },
+                { text: '📥 导出YAML', callback_data: `sd_yaml_${session.id}` }
+            ],
+            [
+                { text: '✏️ 重命名', callback_data: `sd_rename_${session.id}` },
                 { text: '🔗 生成短链', callback_data: `sd_link_${session.id}` }
             ],
             [
@@ -2495,6 +2519,37 @@ async function handleListCommand(chatId, userId, env, page = 0, type = 'all', me
     }
 }
 
+async function handleTelegramPagePromptInput(chatId, userId, text, env, requestCache = null) {
+    const cache = requestCache || createRequestCache();
+    const pending = await readTelegramPagePrompt(env, cache, chatId, userId);
+    if (!pending) return false;
+
+    const input = String(text || '').trim();
+    if (!/^\d+$/.test(input) || Number(input) < 1) {
+        await sendTelegramMessage(chatId, '请输入大于 0 的数字页码。', env, {
+            requestCache: cache,
+            reply_markup: {
+                force_reply: true,
+                selective: true,
+                input_field_placeholder: '输入页码，例如 2'
+            }
+        });
+        return true;
+    }
+
+    await pending.storageAdapter.delete(pending.key).catch(() => {});
+    await handleListCommand(
+        chatId,
+        userId,
+        env,
+        Number.parseInt(input, 10) - 1,
+        pending.prompt.type,
+        pending.prompt.messageId,
+        cache
+    );
+    return true;
+}
+
 async function handleListTypeSelector(chatId, env, messageId = null, requestCache = null) {
     const message = '📋 <b>请选择列表类型</b>\n\n' +
         '🚀 节点列表：手动添加的代理节点\n' +
@@ -3004,6 +3059,56 @@ async function handleRenameCommand(chatId, userId, args, env) {
     } catch (error) {
         console.error('[Telegram Push] Rename command failed:', error);
         await sendTelegramMessage(chatId, `❌ 重命名失败: ${escapeHtml(error.message)}`, env);
+    }
+}
+
+async function handleRenameSubscriptionCommand(chatId, userId, args, env, requestCache = null) {
+    try {
+        if (args.length < 2) {
+            await sendTelegramMessage(
+                chatId,
+                '✏️ <b>重命名订阅</b>\n\n' +
+                '用法：/rename_sub [序号] [新名称]\n\n' +
+                '示例：/rename_sub 1 我的机场',
+                env
+            );
+            return;
+        }
+
+        const index = Number.parseInt(args[0], 10) - 1;
+        const newName = args.slice(1).join(' ').trim();
+        if (!Number.isInteger(index) || index < 0) {
+            await sendTelegramMessage(chatId, '❌ 请输入有效的订阅序号', env);
+            return;
+        }
+        if (!newName) {
+            await sendTelegramMessage(chatId, '❌ 请输入新名称', env);
+            return;
+        }
+        if (newName.length > 120) {
+            await sendTelegramMessage(chatId, '❌ 新名称不能超过 120 个字符', env);
+            return;
+        }
+
+        const cache = requestCache || createRequestCache();
+        const selected = await resolveTelegramSubscriptionListSelection(userId, index, env, cache);
+        if (!selected) {
+            await sendTelegramMessage(chatId, '❌ 订阅序号不存在或无权操作', env);
+            return;
+        }
+
+        const oldName = selected.subscription.name || '未命名订阅';
+        selected.subscription.name = newName;
+        await persistCachedSubscriptions(env, cache);
+        await sendTelegramMessage(
+            chatId,
+            `✅ <b>订阅重命名成功</b>\n\n原名称：${escapeHtml(oldName)}\n新名称：${escapeHtml(newName)}`,
+            env,
+            { requestCache: cache }
+        );
+    } catch (error) {
+        console.error('[Telegram Push] Rename subscription command failed:', error);
+        await sendTelegramMessage(chatId, `❌ 重命名订阅失败: ${escapeHtml(error.message)}`, env);
     }
 }
 
@@ -3928,6 +4033,10 @@ async function handleCommand(chatId, text, userId, env, request, requestCache = 
             await handleRenameCommand(chatId, userId, args, env);
             break;
 
+        case '/rename_sub':
+            await handleRenameSubscriptionCommand(chatId, userId, args, env, requestCache);
+            break;
+
         case '/info':
         case '/detail':
             await handleInfoCommand(chatId, userId, args, env);
@@ -3987,7 +4096,7 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
 
     try {
         if (data.startsWith('sd_')) {
-            const match = data.match(/^sd_(refresh|delete|confirm|cancel|export|link|back)_(.+)$/);
+            const match = data.match(/^sd_(refresh|delete|confirm|cancel|b64|yaml|rename|link|back)_(.+)$/);
             if (!match) {
                 await answerCallbackQuery(callbackQuery.id, '无效操作', env, true);
                 return createJsonResponse({ ok: true });
@@ -4011,6 +4120,17 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                 const subscription = subscriptions.find(item => item.id === session.savedSubscriptionId);
                 if (!subscription) {
                     await sendTelegramMessage(chatId, '❌ 订阅不存在或已删除', env, { requestCache: cache });
+                } else if (!isRemoteSubscription(subscription)) {
+                    await renderStoredSubscriptionDetail(
+                        chatId,
+                        messageId,
+                        subscription,
+                        session.subscriptionIndex,
+                        userId,
+                        env,
+                        cache,
+                        { sessionId: session.id, listPage: session.listPage }
+                    );
                 } else {
                     try {
                         await refreshStoredSubscriptionDetail(
@@ -4066,18 +4186,31 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                     await answerCallbackQuery(callbackQuery.id, '已删除', env);
                     await handleListCommand(chatId, userId, env, session.listPage || 0, 'sub', messageId, cache);
                 }
-            } else if (action === 'export') {
+            } else if (action === 'b64' || action === 'yaml') {
                 if (!Array.isArray(session.nodeUrls) || session.nodeUrls.length === 0) {
                     await answerCallbackQuery(callbackQuery.id, '暂无已缓存节点，请先刷新订阅', env, true);
                     return createJsonResponse({ ok: true });
                 }
-                await answerCallbackQuery(callbackQuery.id, '正在导出节点...', env);
-                await sendTelegramDocument(
+                if (action === 'b64') {
+                    await answerCallbackQuery(callbackQuery.id, '正在导出 Base64...', env);
+                    const raw = session.nodeUrls.join('\n');
+                    const encoded = btoa(unescape(encodeURIComponent(raw)));
+                    await sendTelegramDocument(chatId, `${session.name || 'subscription'}.txt`, encoded, env, `${session.name || '订阅'} · Base64`);
+                } else {
+                    await answerCallbackQuery(callbackQuery.id, '正在导出 YAML...', env);
+                    const yaml = generateClashConfig(session.nodeUrls, {
+                        addFlagEmoji: true,
+                        sourceClashConfig: session.sourceClashConfig
+                    });
+                    await sendTelegramDocument(chatId, `${session.name || 'subscription'}.yaml`, yaml, env, `${session.name || '订阅'} · Clash YAML`);
+                }
+            } else if (action === 'rename') {
+                await answerCallbackQuery(callbackQuery.id, '请发送新名称', env);
+                await sendTelegramMessage(
                     chatId,
-                    `${session.name || 'subscription'}.txt`,
-                    session.nodeUrls.join('\n'),
+                    `请发送以下格式重命名订阅：\n<code>/rename_sub ${Number(session.subscriptionIndex || 0) + 1} 新名称</code>`,
                     env,
-                    `${session.name || '订阅'} · ${session.nodeUrls.length} 个节点`
+                    { requestCache: cache }
                 );
             } else if (action === 'link') {
                 await answerCallbackQuery(callbackQuery.id, '正在生成短链...', env);
@@ -4234,12 +4367,32 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
         }
 
         if (data === 'prompt_sub_page') {
-            await answerCallbackQuery(callbackQuery.id, '请发送 /list sub 页码', env, true);
+            const cache = requestCache || createRequestCache();
+            await saveTelegramPagePrompt(env, cache, chatId, userId, 'sub', messageId);
+            await answerCallbackQuery(callbackQuery.id, '请输入页码', env);
+            await sendTelegramMessage(chatId, '请输入要跳转的订阅列表页码：', env, {
+                requestCache: cache,
+                reply_markup: {
+                    force_reply: true,
+                    selective: true,
+                    input_field_placeholder: '输入页码，例如 2'
+                }
+            });
             return createJsonResponse({ ok: true });
         }
 
         if (data === 'prompt_node_page') {
-            await answerCallbackQuery(callbackQuery.id, '请发送 /list node 页码', env, true);
+            const cache = requestCache || createRequestCache();
+            await saveTelegramPagePrompt(env, cache, chatId, userId, 'node', messageId);
+            await answerCallbackQuery(callbackQuery.id, '请输入页码', env);
+            await sendTelegramMessage(chatId, '请输入要跳转的节点列表页码：', env, {
+                requestCache: cache,
+                reply_markup: {
+                    force_reply: true,
+                    selective: true,
+                    input_field_placeholder: '输入页码，例如 2'
+                }
+            });
             return createJsonResponse({ ok: true });
         }
 
@@ -4925,6 +5078,9 @@ export async function handleTelegramWebhook(request, env) {
                     message.from.language_code
                 );
             } else {
+                if (await handleTelegramPagePromptInput(chatId, userId, text, env, requestCache)) {
+                    return createJsonResponse({ ok: true });
+                }
                 return await handleNodeInput(chatId, text, userId, env, requestCache);
             }
         }

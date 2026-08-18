@@ -55,12 +55,12 @@ function createState(overrides = {}) {
     state,
     adapter: {
       get: vi.fn(async key => (
-        key.startsWith('tg_subscription_preview:') || key.startsWith('node_cache_subscription_')
+        key.startsWith('tg_subscription_preview:') || key.startsWith('node_cache_subscription_') || key.startsWith('tg_page_prompt:')
           ? state.misc[key] || null
           : state.settings
       )),
       put: vi.fn(async (key, value) => {
-        if (key.startsWith('tg_subscription_preview:') || key.startsWith('node_cache_subscription_')) state.misc[key] = value;
+        if (key.startsWith('tg_subscription_preview:') || key.startsWith('node_cache_subscription_') || key.startsWith('tg_page_prompt:')) state.misc[key] = value;
         else state.settings = value;
         return true;
       }),
@@ -2373,14 +2373,39 @@ describe('handleTelegramWebhook', () => {
     ]));
 
     await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'prompt-sub-page',
+        data: 'prompt_sub_page',
+        from: { id: 1 },
+        message: { message_id: 94, chat: { id: 4003 } }
+      }
+    }), { MISUB_KV: null });
+
+    const subPromptBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(subPromptBody).toMatchObject({
+      text: '请输入要跳转的订阅列表页码：',
+      reply_markup: {
+        force_reply: true,
+        selective: true,
+        input_field_placeholder: '输入页码，例如 2'
+      }
+    });
+
+    await handleTelegramWebhook(createRequest({
       message: {
-        text: '/list sub 2',
+        text: '2',
         chat: { id: 4003 },
         from: { id: 1 }
       }
     }), { MISUB_KV: null });
 
-    const secondPageBody = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
+    const secondPageBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
     expect(secondPageBody.text).toContain('第2/2页');
     expect(secondPageBody.reply_markup.inline_keyboard[0][0]).toMatchObject({
       text: expect.stringContaining('#11 Airport 11'),
@@ -2439,21 +2464,23 @@ describe('handleTelegramWebhook', () => {
     }), { MISUB_KV: null });
 
     const promptBody = global.fetch.mock.calls
-      .filter(([url]) => String(url).includes('/answerCallbackQuery'))
+      .filter(([url]) => String(url).includes('/sendMessage'))
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
     expect(promptBody).toMatchObject({
-      callback_query_id: 'prompt-node-page',
-      text: '请发送 /list node 页码',
-      show_alert: true
+      text: '请输入要跳转的节点列表页码：',
+      reply_markup: {
+        force_reply: true,
+        selective: true,
+        input_field_placeholder: '输入页码，例如 2'
+      }
     });
 
     await handleTelegramWebhook(createRequest({
-      callback_query: {
-        id: 'node-list-page-2',
-        data: 'list_page_node_1',
-        from: { id: 1 },
-        message: { message_id: 95, chat: { id: 4004 } }
+      message: {
+        text: '2',
+        chat: { id: 4004 },
+        from: { id: 1 }
       }
     }), { MISUB_KV: null });
 
@@ -2811,18 +2838,13 @@ describe('handleTelegramWebhook', () => {
 
     const buttons = editBody.reply_markup.inline_keyboard;
     expect(buttons).toHaveLength(4);
-    expect(buttons[1]).toEqual([{
-      text: '📋 复制配置名称',
-      copy_text: { text: '悠悠' }
-    }]);
     expect(buttons.flat().map(button => button.text)).toEqual([
       '🔄 刷新订阅', '🗑️ 删除订阅',
-      '📋 复制配置名称',
-      '📦 导出节点', '🔗 生成短链',
+      '📥 导出Base64', '📥 导出YAML',
+      '✏️ 重命名', '🔗 生成短链',
       '⬅️ 返回列表', '🏠 主菜单'
     ]);
-    expect(buttons.flat().filter(button => button.text !== '📋 复制配置名称')
-      .every(button => button.callback_data)).toBe(true);
+    expect(buttons.flat().every(button => button.callback_data)).toBe(true);
   });
 
   it('shows stored metadata without fetching when no node-detail cache exists', async () => {
@@ -2874,7 +2896,7 @@ describe('handleTelegramWebhook', () => {
     expect(detailBody.text).toContain('暂无已缓存节点明细，请点击“刷新订阅”更新');
 
     const exportCallback = detailBody.reply_markup.inline_keyboard.flat()
-      .find(button => button.text === '📦 导出节点').callback_data;
+      .find(button => button.text === '📥 导出Base64').callback_data;
     await invoke(exportCallback);
     expect(global.fetch.mock.calls.some(([url]) => String(url).includes('/sendDocument'))).toBe(false);
     const callbackBodies = global.fetch.mock.calls
@@ -2925,6 +2947,65 @@ describe('handleTelegramWebhook', () => {
     expect(detailBody.text).not.toContain('剩余时间:');
     expect(detailBody.text).not.toContain('🟢 正常');
     expect(detailBody.text).not.toContain('🟢 流量充足');
+  });
+
+  it('refreshes stored inline subscriptions from saved nodes with the same detail actions', async () => {
+    const firstNode = 'vless://00000000-0000-4000-8000-000000000031@inline-one.example.com:443#Inline-One';
+    const secondNode = 'trojan://password@inline-two.example.com:443#Inline-Two';
+    const { state, adapter } = createState({
+      subscriptions: [{
+        id: 'inline-detail-actions',
+        type: 'inline',
+        name: 'Inline Airport',
+        url: 'inline:inline-detail-actions',
+        nodeUrls: [firstNode, secondNode],
+        nodeCount: 2,
+        enabled: true,
+        source: 'telegram',
+        telegram_user_id: 1
+      }]
+    });
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url).startsWith('inline:')) throw new Error('inline subscription must not be fetched');
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    const invoke = data => handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: `inline-detail-${data}`,
+        data,
+        from: { id: 1 },
+        message: { message_id: 97, chat: { id: 4011 } }
+      }
+    }), { MISUB_KV: null });
+
+    await invoke('sub_detail_0');
+    const detailBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    const buttons = detailBody.reply_markup.inline_keyboard.flat();
+    expect(buttons.map(button => button.text)).toEqual([
+      '🔄 刷新订阅', '🗑️ 删除订阅',
+      '📥 导出Base64', '📥 导出YAML',
+      '✏️ 重命名', '🔗 生成短链',
+      '⬅️ 返回列表', '🏠 主菜单'
+    ]);
+
+    await invoke(buttons.find(button => button.text === '🔄 刷新订阅').callback_data);
+    const refreshedBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(refreshedBody.text).toContain('本地内嵌订阅');
+    expect(refreshedBody.text).toContain('节点列表（共2个）');
+    expect(refreshedBody.text).toContain('Inline-One');
+    expect(refreshedBody.text).toContain('Inline-Two');
+    expect(state.subscriptions).toHaveLength(1);
+    expect(global.fetch.mock.calls.some(([url]) => String(url).startsWith('inline:'))).toBe(false);
   });
 
   it('migrates legacy URL-keyed node details when assigning a stored subscription id', async () => {
@@ -3041,16 +3122,35 @@ describe('handleTelegramWebhook', () => {
     expect(reopenedBody.text).toContain('First-Node');
     expect(reopenedBody.text).toContain('Second-Node');
 
-    await invoke(callbackFor('📦 导出节点'));
-    const documentCall = global.fetch.mock.calls.find(([url]) => String(url).includes('/sendDocument'));
+    await invoke(callbackFor('📥 导出Base64'));
+    let documentCall = global.fetch.mock.calls.find(([url]) => String(url).includes('/sendDocument'));
     expect(documentCall).toBeTruthy();
-    expect(await documentCall[1].body.get('document').text()).toBe(`${firstNode}\n${secondNode}`);
+    expect(atob(await documentCall[1].body.get('document').text())).toBe(`${firstNode}\n${secondNode}`);
+
+    await invoke(callbackFor('📥 导出YAML'));
+    documentCall = global.fetch.mock.calls.filter(([url]) => String(url).includes('/sendDocument')).at(-1);
+    expect(yaml.load(await documentCall[1].body.get('document').text()).proxies).toHaveLength(2);
+
+    await invoke(callbackFor('✏️ 重命名'));
+    let sentBodies = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body));
+    expect(sentBodies.some(body => body.text?.includes('/rename_sub 1 新名称'))).toBe(true);
+
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: '/rename_sub 1 Renamed Airport',
+        chat: { id: 4006 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+    expect(state.subscriptions[0].name).toBe('Renamed Airport');
 
     await invoke(callbackFor('🔗 生成短链'));
     expect(state.profiles).toEqual(expect.arrayContaining([
       expect.objectContaining({ subscriptions: ['airport-detail-actions'] })
     ]));
-    const sentBodies = global.fetch.mock.calls
+    sentBodies = global.fetch.mock.calls
       .filter(([url]) => String(url).includes('/sendMessage'))
       .map(([, options]) => JSON.parse(options.body));
     expect(sentBodies.some(body => body.text?.includes('https://example.com/profiles/tg-'))).toBe(true);
