@@ -291,7 +291,9 @@ describe('handleTelegramWebhook', () => {
     expect(card.text).toContain('Demo-Airport');
     expect(card.text).toContain('节点总数: 1');
     expect(card.text).not.toContain('<b>');
+    expect(card.text).toContain('📊 流量详情: 3GB / 100GB 🟢 流量充足');
     expect(card.text).toMatch(/使用进度: [▰▱]{10} 3\.0%/);
+    expect(card.text).toMatch(/🗓️ 过期时间: .* 🟢 正常/);
     expect(card.text).toContain('Test-Node');
     expect(card.text).toContain(`<code>${subscriptionUrl}</code>`);
     expect(card.text).not.toContain('<a href=');
@@ -364,6 +366,85 @@ describe('handleTelegramWebhook', () => {
     expect(sentBodies.some(body => body.text?.includes('https://example.com/profiles/tg-'))).toBe(true);
   });
 
+  it.each([
+    [80, '🟠 流量不足'],
+    [100, '🔴 流量耗尽']
+  ])('marks %i%% subscription usage as %s', async (used, expectedStatus) => {
+    const subscriptionUrl = `https://sub.example.com/traffic-status-${used}`;
+    const nodeUrl = `vless://00000000-0000-4000-8000-000000000005@node${used}.example.com:443?security=tls#Traffic-${used}`;
+    const { adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (url === subscriptionUrl) {
+        return new Response(btoa(`${nodeUrl}\n`), {
+          status: 200,
+          headers: {
+            'Content-Disposition': `attachment; filename=Traffic-${used}.yaml`,
+            'subscription-userinfo': `upload=${used}; download=0; total=100; expire=4102444800`
+          }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: subscriptionUrl,
+        chat: { id: 2104 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    const card = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(card.text).toContain(`📊 流量详情: ${used}B / 100B ${expectedStatus}`);
+  });
+
+  it.each([
+    [31, '🟢 正常'],
+    [10, '🟠 临近到期'],
+    [2, '🔴 即将到期'],
+    [-1, '🔴 已过期']
+  ])('marks a subscription expiring in %i days as %s', async (days, expectedStatus) => {
+    const subscriptionUrl = `https://sub.example.com/expiry-status-${days}`;
+    const nodeUrl = `vless://00000000-0000-4000-8000-000000000006@expiry${days}.example.com:443?security=tls#Expiry-${days}`;
+    const { adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+    const expire = Math.floor(Date.now() / 1000) + days * 86400;
+
+    global.fetch = vi.fn(async url => {
+      if (url === subscriptionUrl) {
+        return new Response(btoa(`${nodeUrl}\n`), {
+          status: 200,
+          headers: {
+            'Content-Disposition': `attachment; filename=Expiry-${days}.yaml`,
+            'subscription-userinfo': `upload=10; download=0; total=100; expire=${expire}`
+          }
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        text: subscriptionUrl,
+        chat: { id: 2105 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    const card = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(card.text).toMatch(new RegExp(`🗓️ 过期时间: .* ${expectedStatus}$`, 'm'));
+  });
+
   it('keeps unknown traffic and long-term expiry visible when subscription metadata is missing', async () => {
     const subscriptionUrl = 'https://sub.example.com/without-metadata';
     const nodeUrl = 'vless://00000000-0000-4000-8000-000000000004@node.example.com:443?security=tls#No-Metadata';
@@ -394,7 +475,10 @@ describe('handleTelegramWebhook', () => {
       .at(-1)[1].body);
     expect(card.text).toContain('📊 流量详情: 未知');
     expect(card.text).toContain('🗓️ 过期时间: 长期有效');
-    expect(card.text).not.toContain('🟢 正常');
+    expect(card.text).toContain('🗓️ 过期时间: 长期有效 🟢 正常');
+    expect(card.text).not.toContain('🟢 流量充足');
+    expect(card.text).not.toContain('🟠 流量不足');
+    expect(card.text).not.toContain('🔴 流量耗尽');
     expect(card.text).not.toContain('📈 使用进度:');
     expect(card.text).not.toContain('💵 剩余可用:');
     expect(card.text).not.toContain('⌛ 剩余时间:');
@@ -473,7 +557,9 @@ describe('handleTelegramWebhook', () => {
     expect(report).toContain('过期时间: 长期有效');
     expect(report).toContain(validNode);
     expect(report).toContain('状态: 耗尽');
+    expect(report).toContain('流量详情: 100B / 100B 🔴 流量耗尽');
     expect(report).toContain('状态: 过期');
+    expect(report).toMatch(/过期时间: .* 🔴 已过期/);
     expect(report).toContain('状态: 失效');
     expect(report).toContain('失败原因: 内容解析阶段失败：未识别到可用节点');
     expect(report).not.toContain(unsupportedNode);
@@ -1195,6 +1281,53 @@ describe('handleTelegramWebhook', () => {
       type: 'select',
       proxies: [exportedConfig.proxies[0].name, 'DIRECT']
     }]);
+  });
+  it('does not fetch HTTP proxy nodes parsed from Clash YAML documents', async () => {
+    const yamlText = [
+      'proxies:',
+      '  - name: YAML-HTTP-Proxy',
+      '    type: http',
+      '    server: http-proxy.example.com',
+      '    port: 8080'
+    ].join('\n');
+    const { state, adapter } = createState();
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      const value = String(url);
+      if (value.includes('/getFile')) {
+        return new Response(JSON.stringify({ ok: true, result: { file_path: 'documents/http-proxy.yaml' } }), { status: 200 });
+      }
+      if (value.includes('/file/botbot-token/documents/http-proxy.yaml')) {
+        return new Response(yamlText, { status: 200 });
+      }
+      if (value.includes('http-proxy.example.com')) {
+        throw new Error('HTTP proxy node must not be fetched as a subscription');
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      message: {
+        document: {
+          file_id: 'telegram-http-proxy-yaml-file-id',
+          file_name: 'http-proxy.yaml',
+          file_size: yamlText.length,
+          mime_type: 'application/yaml'
+        },
+        chat: { id: 2113 },
+        from: { id: 1 }
+      }
+    }), { MISUB_KV: null });
+
+    expect(state.subscriptions).toHaveLength(0);
+    expect(global.fetch.mock.calls.some(([url]) => String(url).includes('http-proxy.example.com'))).toBe(false);
+    const previewCard = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/sendMessage'))
+      .map(([, options]) => JSON.parse(options.body))
+      .find(body => body.text?.includes('YAML-HTTP-Proxy'));
+    expect(previewCard.text).toContain('来源类型:</b> 节点链接');
   });
   it('imports legacy Clash documents that use the singular Proxy key', async () => {
     const yaml = [
@@ -2665,6 +2798,8 @@ describe('handleTelegramWebhook', () => {
     expect(editBody.text).toContain('<b>配置名称:</b> <code>悠悠</code>');
     expect(editBody.text).toContain(`<code>${subscriptionUrl}</code>`);
     expect(editBody.text).toContain('<b>流量详情:</b> 158.00 GB / 200.00 GB');
+    expect(editBody.text).toContain('<b>流量详情:</b> 158.00 GB / 200.00 GB 🟢 流量充足');
+    expect(editBody.text).toMatch(/<b>🗓️ 过期时间:<\/b> .* 🟢 正常/);
     expect(editBody.text).toContain('<b>使用进度:</b>');
     expect(editBody.text).toContain('<b>剩余可用:</b> 42.00 GB');
     expect(editBody.text).toContain('<blockquote expandable>🔌 节点列表（共2个）');
@@ -2749,6 +2884,47 @@ describe('handleTelegramWebhook', () => {
       text: '暂无已缓存节点，请先刷新订阅',
       show_alert: true
     });
+  });
+
+  it('shows only unknown traffic and long-term expiry when stored subscription metadata is absent', async () => {
+    const subscriptionUrl = 'https://airport.example/no-stored-metadata';
+    const { adapter } = createState({
+      subscriptions: [{
+        id: 'airport-no-stored-metadata',
+        name: 'No Metadata Airport',
+        url: subscriptionUrl,
+        enabled: true,
+        nodeCount: 3
+      }]
+    });
+    createAdapter.mockReturnValue(adapter);
+
+    global.fetch = vi.fn(async url => {
+      if (String(url) === subscriptionUrl) throw new Error('stored detail must not fetch the subscription');
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    const { handleTelegramWebhook } = await import('../../functions/modules/handlers/telegram-webhook-handler.js');
+    await handleTelegramWebhook(createRequest({
+      callback_query: {
+        id: 'open-no-metadata-subscription',
+        data: 'sub_detail_0',
+        from: { id: 1 },
+        message: { message_id: 96, chat: { id: 4009 } }
+      }
+    }), { MISUB_KV: null });
+
+    const detailBody = global.fetch.mock.calls
+      .filter(([url]) => String(url).includes('/editMessageText'))
+      .map(([, options]) => JSON.parse(options.body))
+      .at(-1);
+    expect(detailBody.text).toContain('📊 <b>流量详情:</b> 未知');
+    expect(detailBody.text).toContain('<b>🗓️ 过期时间:</b> 长期有效');
+    expect(detailBody.text).not.toContain('使用进度:');
+    expect(detailBody.text).not.toContain('剩余可用:');
+    expect(detailBody.text).not.toContain('剩余时间:');
+    expect(detailBody.text).not.toContain('🟢 正常');
+    expect(detailBody.text).not.toContain('🟢 流量充足');
   });
 
   it('migrates legacy URL-keyed node details when assigning a stored subscription id', async () => {

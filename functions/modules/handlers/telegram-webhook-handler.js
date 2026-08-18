@@ -373,10 +373,12 @@ function buildBatchSubscriptionReport(results) {
 
             lines.push(`机场名称: ${preview.name || '未命名订阅'}`);
             lines.push(`节点总数: ${nodes.length}`);
-            lines.push(`流量详情: ${details.trafficText}`);
+            const trafficStatus = getTrafficUsageStatus(details.usagePercent);
+            lines.push(`流量详情: ${details.trafficText}${trafficStatus ? ` ${trafficStatus}` : ''}`);
             lines.push(`使用进度: ${details.usagePercent === null ? '未知' : `${details.usagePercent.toFixed(1)}%`}`);
             lines.push(`剩余可用: ${details.remainingText}`);
-            lines.push(`过期时间: ${details.expiryText}`);
+            const expiryStatus = getSubscriptionExpiryStatus(info.expire);
+            lines.push(`过期时间: ${details.expiryText} ${expiryStatus}`);
             lines.push(`剩余时间: ${details.remainingTimeText}`);
             if (Number(info.resetRemainingSeconds || 0) > 0) {
                 lines.push(`下次重置: ${formatResetRemainingTime(info.resetRemainingSeconds)}`);
@@ -518,7 +520,10 @@ function prepareTelegramDocumentInput(text) {
         || /^\s*\[(?:Proxy|Proxy Group|General|Server Local|Server Remote|Filter Remote|Rewrite Remote|DNS)\]\s*$/im.test(content)
         || parsedNodes.some(nodeUrl => !embeddedNodeUrls.includes(nodeUrl));
 
-    return isStructuredConfig ? parsedNodes.join('\n') : content;
+    return {
+        input: isStructuredConfig ? parsedNodes.join('\n') : content,
+        parsedNodes: isStructuredConfig ? parsedNodes : null
+    };
 }
 
 function normalizeTelegramFilePath(value) {
@@ -818,6 +823,28 @@ function buildUsageProgress(percent) {
     return `${'▰'.repeat(filled)}${'▱'.repeat(10 - filled)}`;
 }
 
+function getTrafficUsageStatus(usagePercent) {
+    if (usagePercent === null || usagePercent === undefined || usagePercent === '') return '';
+    const percent = Number(usagePercent);
+    if (!Number.isFinite(percent)) return '';
+    if (percent >= 100) return '🔴 流量耗尽';
+    if (percent >= 80) return '🟠 流量不足';
+    return '🟢 流量充足';
+}
+
+function getSubscriptionExpiryStatus(expireSeconds) {
+    const expire = Number(expireSeconds || 0);
+    if (!Number.isFinite(expire) || expire <= 0) return '🟢 正常';
+
+    const remainingMs = expire * 1000 - Date.now();
+    if (remainingMs <= 0) return '🔴 已过期';
+
+    const days = Math.ceil(remainingMs / 86400000);
+    if (days <= 3) return '🔴 即将到期';
+    if (days <= TELEGRAM_SUBSCRIPTION_EXPIRING_DAYS) return '🟠 临近到期';
+    return '🟢 正常';
+}
+
 function truncateTelegramText(value, maxLength = 80) {
     const text = String(value || '');
     return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
@@ -1045,10 +1072,8 @@ function buildSubscriptionPreviewCard(session) {
     const regions = [...new Set(nodes.map(node => node.region).filter(region => region && region !== '其他'))];
     const info = session.userInfo || {};
     const details = getSubscriptionInfoDisplay(info);
-    const expire = Number(info.expire || 0);
-    const status = Number.isFinite(expire) && expire > 0 && expire * 1000 <= Date.now()
-        ? '🔴 已到期'
-        : '🟢 正常';
+    const trafficStatus = getTrafficUsageStatus(details.usagePercent);
+    const expiryStatus = getSubscriptionExpiryStatus(info.expire);
     const regionText = regions.slice(0, 10).map(region => `${getRegionEmoji(region)}${region}`).join(',') || '未识别';
 
     const displayName = truncateTelegramText(session.name, 100);
@@ -1065,16 +1090,16 @@ function buildSubscriptionPreviewCard(session) {
         const progressText = details.usagePercent === null
             ? '未知'
             : `${buildUsageProgress(details.usagePercent)} ${details.usagePercent.toFixed(1)}%`;
-        message += ` ${status}\n`;
+        message += `${trafficStatus ? ` ${trafficStatus}` : ''}\n`;
         message += `📈 使用进度: ${progressText}\n`;
         message += `💵 剩余可用: ${escapeHtml(details.remainingText)}\n`;
-        message += `🗓️ 过期时间: ${details.expiryText}\n`;
+        message += `🗓️ 过期时间: ${details.expiryText} ${expiryStatus}\n`;
         message += `⌛ 剩余时间: ${details.remainingTimeText}`;
         if (Number(info.resetRemainingSeconds || 0) > 0) {
             message += `\n🔄 下次重置: ${formatResetRemainingTime(info.resetRemainingSeconds)}`;
         }
     } else {
-        message += `\n🗓️ 过期时间: ${details.expiryText}`;
+        message += `\n🗓️ 过期时间: ${details.expiryText} ${expiryStatus}`;
     }
     message += '</blockquote>\n';
     message += `<blockquote>🔌 协议类型: ${escapeHtml(protocols.join('、') || '未识别')}\n`;
@@ -1232,16 +1257,22 @@ function buildStoredSubscriptionDetailCard(session) {
     message += `<b>配置名称:</b> <code>${escapeHtml(name)}</code>\n`;
     message += `<b>订阅来源:</b>\n<code>${escapeHtml(sourceUrl)}</code>\n`;
 
-    const progressText = details.usagePercent === null
-        ? '未知'
-        : `${buildUsageProgress(details.usagePercent)} ${details.usagePercent.toFixed(1)}%`;
-    message += `<blockquote><b>流量详情:</b> ${escapeHtml(details.trafficText)}\n`;
-    message += `<b>使用进度:</b> ${progressText}\n`;
-    message += `<b>剩余可用:</b> ${escapeHtml(details.remainingText)}\n`;
-    message += `<b>🗓️ 过期时间:</b> ${details.expiryText}\n`;
-    message += `<b>剩余时间:</b> ${details.remainingTimeText}`;
-    if (Number(info.resetRemainingSeconds || 0) > 0) {
-        message += `\n<b>下次重置:</b> ${formatResetRemainingTime(info.resetRemainingSeconds)}`;
+    message += `<blockquote>📊 <b>流量详情:</b> ${escapeHtml(details.trafficText)}`;
+    if (details.hasTraffic) {
+        const progressText = details.usagePercent === null
+            ? '未知'
+            : `${buildUsageProgress(details.usagePercent)} ${details.usagePercent.toFixed(1)}%`;
+        const trafficStatus = getTrafficUsageStatus(details.usagePercent);
+        message += `${trafficStatus ? ` ${trafficStatus}` : ''}\n`;
+        message += `<b>使用进度:</b> ${progressText}\n`;
+        message += `<b>剩余可用:</b> ${escapeHtml(details.remainingText)}\n`;
+        message += `<b>🗓️ 过期时间:</b> ${details.expiryText} ${getSubscriptionExpiryStatus(info.expire)}\n`;
+        message += `<b>剩余时间:</b> ${details.remainingTimeText}`;
+        if (Number(info.resetRemainingSeconds || 0) > 0) {
+            message += `\n<b>下次重置:</b> ${formatResetRemainingTime(info.resetRemainingSeconds)}`;
+        }
+    } else {
+        message += `\n<b>🗓️ 过期时间:</b> ${details.expiryText}`;
     }
     message += '</blockquote>\n';
 
@@ -3542,7 +3573,9 @@ async function handleNodeInput(chatId, text, userId, env, requestCache = null, o
         // 1. 普通消息中的节点、Base64 和混合文本统一直接解析。
         let nodeUrls;
         try {
-            nodeUrls = await resolveTelegramNodeInput(text);
+            nodeUrls = Array.isArray(options.parsedNodeUrls)
+                ? options.parsedNodeUrls
+                : await resolveTelegramNodeInput(text);
         } catch (error) {
             await sendTelegramMessage(chatId, buildTelegramParseFailureMessage('订阅解析失败', error), env);
             return createJsonResponse({ ok: true });
@@ -3798,11 +3831,12 @@ async function handleTelegramDocumentInput(chatId, document, userId, env, reques
         );
         const text = await fetchTelegramDocumentText(document, env, cache);
         const sourceClashConfig = extractClashSourceConfig(text);
-        const input = prepareTelegramDocumentInput(text);
-        return handleNodeInput(chatId, input, userId, env, cache, {
+        const preparedInput = prepareTelegramDocumentInput(text);
+        return handleNodeInput(chatId, preparedInput.input, userId, env, cache, {
             rateLimitChecked: true,
             forceInline: true,
             skipSubscriptionPreview: true,
+            parsedNodeUrls: preparedInput.parsedNodes,
             failureDiagnosticInput: text,
             inlineName: getInlineSubscriptionName(filename),
             inlineFilename: filename,
