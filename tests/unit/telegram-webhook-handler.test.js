@@ -2418,7 +2418,7 @@ describe('handleTelegramWebhook', () => {
   });
 
   it('renders manual nodes as full-width detail buttons with stable pagination indexes', async () => {
-    const subscriptions = Array.from({ length: 7 }, (_, index) => ({
+    const subscriptions = Array.from({ length: 11 }, (_, index) => ({
       id: `node-${index + 1}`,
       name: `Node ${index + 1}`,
       url: `vless://uuid@example${index + 1}.com:443#Node-${index + 1}`,
@@ -2438,9 +2438,9 @@ describe('handleTelegramWebhook', () => {
 
     const firstPageBody = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
     const firstPageRows = firstPageBody.reply_markup.inline_keyboard;
-    expect(firstPageBody.text).toContain('节点列表 共7个 | 第1/2页');
+    expect(firstPageBody.text).toContain('节点列表 共11个 | 第1/2页');
     expect(firstPageBody.text).not.toContain('Node 1');
-    expect(firstPageRows.slice(0, 6).every(row => row.length === 1)).toBe(true);
+    expect(firstPageRows.slice(0, 10).every(row => row.length === 1)).toBe(true);
     expect(firstPageRows[0][0]).toMatchObject({
       text: '✅ #1 Node 1 [VLESS]',
       callback_data: 'node_action_node_0'
@@ -2488,16 +2488,16 @@ describe('handleTelegramWebhook', () => {
       .filter(([url]) => String(url).includes('/editMessageText'))
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
-    expect(secondPageBody.text).toContain('节点列表 共7个 | 第2/2页');
+    expect(secondPageBody.text).toContain('节点列表 共11个 | 第2/2页');
     expect(secondPageBody.reply_markup.inline_keyboard[0][0]).toMatchObject({
-      text: '✅ #7 Node 7 [VLESS]',
-      callback_data: 'node_action_node_6'
+      text: '✅ #11 Node 11 [VLESS]',
+      callback_data: 'node_action_node_10'
     });
 
     await handleTelegramWebhook(createRequest({
       callback_query: {
-        id: 'open-node-7',
-        data: 'node_action_node_6',
+        id: 'open-node-11',
+        data: 'node_action_node_10',
         from: { id: 1 },
         message: { message_id: 95, chat: { id: 4004 } }
       }
@@ -2507,12 +2507,12 @@ describe('handleTelegramWebhook', () => {
       .filter(([url]) => String(url).includes('/editMessageText'))
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
-    expect(detailBody.text).toContain('机场名称:</b> <code>Node 7</code>');
+    expect(detailBody.text).toContain('机场名称:</b> <code>Node 11</code>');
     expect(detailBody.text).toContain('来源类型:</b> 节点链接');
     expect(detailBody.text).toContain('流量详情:</b> 未知');
     expect(detailBody.text).toContain('过期时间:</b> 长期有效');
-    expect(detailBody.text).toContain('- name: Node-7');
-    expect(detailBody.text).toContain('server: example7.com');
+    expect(detailBody.text).toContain('- name: Node-11');
+    expect(detailBody.text).toContain('server: example11.com');
     const detailButtons = detailBody.reply_markup.inline_keyboard.flat();
     expect(detailButtons.map(button => button.text)).toEqual([
       '🔄 刷新订阅信息', '📄 显示全部节点',
@@ -2527,7 +2527,7 @@ describe('handleTelegramWebhook', () => {
     const refreshCallback = detailButtons.find(button => button.text === '🔄 刷新订阅信息').callback_data;
     await handleTelegramWebhook(createRequest({
       callback_query: {
-        id: 'refresh-node-7',
+        id: 'refresh-node-11',
         data: refreshCallback,
         from: { id: 1 },
         message: { message_id: 95, chat: { id: 4004 } }
@@ -2538,7 +2538,7 @@ describe('handleTelegramWebhook', () => {
       .filter(([url]) => String(url).includes('/editMessageText'))
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
-    expect(refreshedDetailBody.text).toContain('机场名称:</b> <code>Node 7</code>');
+    expect(refreshedDetailBody.text).toContain('机场名称:</b> <code>Node 11</code>');
     expect(refreshedDetailBody.reply_markup.inline_keyboard.flat()).toEqual(expect.arrayContaining([
       expect.objectContaining({ text: '⬅️ 返回节点列表', callback_data: 'list_page_node_1' })
     ]));
@@ -2556,10 +2556,10 @@ describe('handleTelegramWebhook', () => {
       .filter(([url]) => String(url).includes('/editMessageText'))
       .map(([, options]) => JSON.parse(options.body))
       .at(-1);
-    expect(returnedListBody.text).toContain('节点列表 共7个 | 第2/2页');
+    expect(returnedListBody.text).toContain('节点列表 共11个 | 第2/2页');
     expect(returnedListBody.reply_markup.inline_keyboard[0][0]).toMatchObject({
-      text: '✅ #7 Node 7 [VLESS]',
-      callback_data: 'node_action_node_6'
+      text: '✅ #11 Node 11 [VLESS]',
+      callback_data: 'node_action_node_10'
     });
   });
 

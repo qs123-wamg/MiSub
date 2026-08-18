@@ -82,6 +82,7 @@ async function getStorageAdapter(env) {
 function createRequestCache() {
     return {
         storageAdapter: null,
+        storageAdapterPromise: null,
         settings: undefined,
         subscriptions: undefined,
         profiles: undefined,
@@ -92,7 +93,8 @@ function createRequestCache() {
 
 async function getCachedStorageAdapter(env, cache) {
     if (!cache.storageAdapter) {
-        cache.storageAdapter = await getStorageAdapter(env);
+        cache.storageAdapterPromise ||= getStorageAdapter(env);
+        cache.storageAdapter = await cache.storageAdapterPromise;
     }
     return cache.storageAdapter;
 }
@@ -2160,23 +2162,21 @@ async function checkRateLimit(userId, env, config) {
 /**
  * 获取用户通过 Telegram 添加的节点
  */
-async function getUserNodes(userId, env) {
-    const storageAdapter = await getStorageAdapter(env);
-    const allSubscriptions = await storageAdapter.getAllSubscriptions();
+async function getUserNodes(userId, env, requestCache = null) {
+    const cache = requestCache || createRequestCache();
+    const [allSubscriptions, config] = await Promise.all([
+        getCachedSubscriptions(env, cache),
+        getTelegramPushConfig(env, cache)
+    ]);
+    return filterUserNodesForTelegramUser(allSubscriptions, userId, config);
+}
 
-    // 检查用户是否在白名单中
-    const config = await getTelegramPushConfig(env);
+function filterUserNodesForTelegramUser(allSubscriptions, userId, config) {
     const permission = checkUserPermission(userId, config);
-
-    // 如果用户有权限（白名单用户），则显示所有节点（包括 Web 端添加的）
-    if (permission.allowed) {
-        return allSubscriptions;
-    }
-
-    // 否则仅返回该用户通过 Telegram 添加的节点（兜底逻辑）
-    return allSubscriptions.filter(sub =>
+    if (permission.allowed) return allSubscriptions;
+    return allSubscriptions.filter(sub => (
         sub.source === 'telegram' && sub.telegram_user_id === userId
-    );
+    ));
 }
 
 /**
@@ -2397,9 +2397,16 @@ async function refreshTelegramSubscriptions(env, requestCache = null) {
 async function handleListCommand(chatId, userId, env, page = 0, type = 'all', messageId = null, requestCache = null) {
     try {
         const cache = requestCache || createRequestCache();
-        const allNodes = await getUserNodes(userId, env);
-        const profiles = await getCachedProfiles(env, cache);
-        const settings = await getCachedSettings(env, cache);
+        const [allSubscriptions, profiles, settings] = await Promise.all([
+            getCachedSubscriptions(env, cache),
+            getCachedProfiles(env, cache),
+            getCachedSettings(env, cache)
+        ]);
+        const allNodes = filterUserNodesForTelegramUser(
+            allSubscriptions,
+            userId,
+            settings.telegram_push_config || {}
+        );
         const config = settings.telegram_push_config || {};
 
         // 过滤节点
@@ -2430,7 +2437,10 @@ async function handleListCommand(chatId, userId, env, page = 0, type = 'all', me
                 const keyboard = {
                     inline_keyboard: [[{ text: '🔙 返回菜单', callback_data: 'cmd_menu' }]]
                 };
-                await editTelegramMessage(chatId, messageId, emptyMsg, env, { reply_markup: keyboard });
+                await editTelegramMessage(chatId, messageId, emptyMsg, env, {
+                    requestCache: cache,
+                    reply_markup: keyboard
+                });
             } else {
                 await sendTelegramMessage(chatId, emptyMsg, env);
             }
@@ -2442,7 +2452,7 @@ async function handleListCommand(chatId, userId, env, page = 0, type = 'all', me
             return;
         }
 
-        const pageSize = 6; // 减少每页数量以容纳更多信息
+        const pageSize = 10;
         const totalPages = Math.ceil(userNodes.length / pageSize);
         const currentPage = Math.min(Math.max(0, page), totalPages - 1);
         const startIdx = currentPage * pageSize;
@@ -2508,7 +2518,10 @@ async function handleListCommand(chatId, userId, env, page = 0, type = 'all', me
         };
 
         if (messageId) {
-            await editTelegramMessage(chatId, messageId, message, env, { reply_markup: keyboard });
+            await editTelegramMessage(chatId, messageId, message, env, {
+                requestCache: cache,
+                reply_markup: keyboard
+            });
         } else {
             await sendTelegramMessage(chatId, message, env, { reply_markup: keyboard });
         }
@@ -4356,8 +4369,10 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                 page = parseInt(parts[0]);
             }
 
-            await answerCallbackQuery(callbackQuery.id, '', env);
-            await handleListCommand(chatId, userId, env, page, type, messageId, requestCache);
+            await Promise.all([
+                answerCallbackQuery(callbackQuery.id, '', env),
+                handleListCommand(chatId, userId, env, page, type, messageId, requestCache)
+            ]);
             return createJsonResponse({ ok: true });
         }
 
@@ -4589,7 +4604,7 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                         return createJsonResponse({ ok: true });
                     }
 
-                    const fullList = await getUserNodes(userId, env);
+                    const fullList = await getUserNodes(userId, env, requestCache);
                     const targetList = fullList.filter(item => !isSubscriptionEntry(item));
                     if (idx < 0 || idx >= targetList.length) {
                         await answerCallbackQuery(callbackQuery.id, '对象不存在', env, true);
@@ -4601,7 +4616,7 @@ async function handleCallbackQuery(callbackQuery, env, request, requestCache = n
                     await showNodePreview(chatId, node.url, userId, env, requestCache, {
                         messageId,
                         name: node.name,
-                        nodeListPage: Math.floor(idx / 6)
+                        nodeListPage: Math.floor(idx / 10)
                     });
                     return createJsonResponse({ ok: true });
 
